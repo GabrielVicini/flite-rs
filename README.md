@@ -202,11 +202,12 @@ The models are sensitive to details that look like mistakes. A pitch average
 mixes two different scales, a syllable-counting feature stops one syllable short
 of its mirror image, a count saturates at 19. These are commented where they
 occur; changing them changes the prosody. When touching the pipeline or the DSP,
-compare output against upstream Flite before and after. `--phones` and
-`cargo run --example analysis` narrow down where a divergence begins.
+compare output against upstream Flite before and after. `tools/reference` builds
+a real Flite and checks a corpus against it sample by sample; see the README
+there for the build and for how to bisect a divergence once you have one.
 
 ```console
-$ cargo test
+$ cargo test --release
 $ cargo clippy --all-targets
 ```
 

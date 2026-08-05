@@ -14,7 +14,7 @@
 //! Everything after normalisation is driven by the trained models in
 //! [`Language`]; this module is the wiring, not the knowledge.
 
-use crate::ffeature::{eval_f32, eval_str, ItemPath};
+use crate::ffeature::{eval, eval_f32, eval_str, FeaturePath, ItemPath};
 use crate::language::Language;
 use crate::lexicon;
 use crate::normalize;
@@ -22,22 +22,10 @@ use crate::phoneset;
 use crate::text::Token;
 use crate::utterance::{ItemId, Utterance};
 use crate::value::Value;
-
-/// Prosody settings that a caller may vary per utterance.
-#[derive(Clone, Copy, Debug)]
-pub struct Prosody {
-    /// Multiplies all segment durations; above 1.0 is slower speech.
-    pub duration_stretch: f32,
-    /// Multiplies the pitch target mean.
-    pub f0_shift: f32,
-    /// Mean F0 in Hz for this voice.
-    pub f0_mean: f32,
-    /// F0 standard deviation in Hz for this voice.
-    pub f0_stddev: f32,
-}
+use crate::voice::VoiceParams;
 
 /// Build the full linguistic structure for one sentence of tokens.
-pub fn analyse(lang: &Language, tokens: &[Token], prosody: &Prosody) -> Utterance {
+pub fn analyse(lang: &Language, tokens: &[Token], params: &VoiceParams) -> Utterance {
     let mut utt = Utterance::new();
     build_token_relation(&mut utt, tokens);
     normalise(lang, &mut utt);
@@ -47,8 +35,8 @@ pub fn analyse(lang: &Language, tokens: &[Token], prosody: &Prosody) -> Utteranc
     insert_pauses(&mut utt);
     apply_postlexical_rules(&mut utt);
     predict_intonation(lang, &mut utt);
-    predict_durations(lang, &mut utt, prosody.duration_stretch);
-    predict_f0(&mut utt, prosody);
+    predict_durations(lang, &mut utt, params.duration_stretch);
+    predict_f0(&mut utt, params);
     utt
 }
 
@@ -314,13 +302,29 @@ fn duration_stats(phone: &str) -> (f32, f32) {
 /// own statistics, so context shifts the duration while each phone keeps its
 /// characteristic length.
 fn predict_durations(lang: &Language, utt: &mut Utterance, stretch: f32) {
+    let local_path =
+        FeaturePath::parse("R:SylStructure.parent.parent.R:Token.parent.local_duration_stretch");
     let segments: Vec<ItemId> = utt.iter_relation("Segment").collect();
     let mut end = 0.0f32;
     for seg in segments {
         let z = lang.duration.interpret_f32(utt, seg);
         let (mean, stddev) = duration_stats(utt.name(seg));
+        let stretch = local_stretch(utt, seg, &local_path, stretch);
         end += stretch * (z * stddev + mean);
         utt.set_feature(seg, "end", Value::Float(end));
+    }
+}
+
+/// A token may carry its own speech rate, which multiplies the voice's rather
+/// than replacing it.
+///
+/// An unset feature reads as zero, so zero means "not set" and there is no way
+/// to ask for a stretch of zero. That is upstream's convention, and markup that
+/// sets these features relies on it.
+fn local_stretch(utt: &Utterance, item: ItemId, path: &FeaturePath, stretch: f32) -> f32 {
+    match eval(utt, item, path).as_f32() {
+        0.0 => stretch,
+        local => local * stretch,
     }
 }
 
@@ -429,17 +433,20 @@ fn apply_f0_model(utt: &Utterance, syl: ItemId) -> (f32, f32, f32) {
 
 /// Three pitch targets per syllable: at its start, in its vowel, and at a
 /// phrase edge also at its end.
-fn predict_f0(utt: &mut Utterance, prosody: &Prosody) {
+fn predict_f0(utt: &mut Utterance, params: &VoiceParams) {
     let target_rel = utt.create_relation("Target");
-    let mean = prosody.f0_mean * prosody.f0_shift;
-    let stddev = prosody.f0_stddev;
+    let mean = params.int_f0_target_mean * params.f0_shift;
+    let stddev = params.int_f0_target_stddev;
     // Rescale a raw model prediction onto this voice's pitch range. Done in
     // f64 and narrowed once, so the result does not depend on how the
     // intermediate rounds.
-    let map = |v: f32| {
+    let map = |v: f32, mean: f32, stddev: f32| {
         (((v as f64 - MODEL_F0_MEAN as f64) / MODEL_F0_STDDEV as f64) * stddev as f64 + mean as f64)
             as f32
     };
+
+    let shift_path = FeaturePath::parse("R:SylStructure.parent.R:Token.parent.local_f0_shift");
+    let range_path = FeaturePath::parse("R:SylStructure.parent.R:Token.parent.local_f0_range");
 
     let syllables: Vec<ItemId> = utt.iter_relation("Syllable").collect();
     let mut previous_end = 0.0f32;
@@ -452,6 +459,16 @@ fn predict_f0(utt: &mut Utterance, prosody: &Prosody) {
             continue; // a syllable with no segments contributes nothing
         }
         let (start, mid, end) = apply_f0_model(utt, syl);
+
+        // A token may narrow or move the pitch range for its own words. Both
+        // read as zero when unset; the shift multiplies the voice's mean, the
+        // range replaces its spread outright.
+        let mean = local_stretch(utt, syl, &shift_path, mean);
+        let stddev = match eval(utt, syl, &range_path).as_f32() {
+            0.0 => stddev,
+            local => local,
+        };
+        let map = |v: f32| map(v, mean, stddev);
 
         if is_after_break(utt, syl) {
             previous_end = map(start);

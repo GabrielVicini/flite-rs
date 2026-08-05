@@ -1,0 +1,295 @@
+# Verification corpus for tools/reference.
+#
+# Every line is synthesised by both engines and compared sample for sample, so
+# a line only belongs here if it exercises something: a normalisation rule, a
+# feature that saturates, a path through letter-to-sound. Blank lines and lines
+# starting with # are skipped.
+#
+# The generated sections were produced once from a fixed seed and then frozen,
+# so that a regression cannot be hidden by the corpus shifting underneath it.
+
+# Flite's own normalisation tests, from testsuite/us.flitecheck.
+Henry V, Part II, Scene IV, I believe, is V I Lenin not Charles I.
+It's 14 St. Andrews St, where Dr. Jekyll has his office.
+I remember in 1976 there were 86 people attending the conference with a probability of 0.23.
+I think that 12,345 events have a 12.3% increase of 5.6 million.
+The $2.7 million in the budget will be spent at $1.27 a minute.
+I used to work at I.B.M. but moved to the U.S. later in life, a move of over 1,023km.
+I used to work at CASA but when I moved to QRN later in life, my suitcase weighed 102lb.
+It's 412-268-6299 but you can also just call 268-6299, but internally 8-6299 works too.
+It's (412) 268 6299 but you can also just call 268 6299, but internally 8 6299 works too, but my Berlin number is +49 21 89 76 66 03.
+We met 22-23 Sept 2005-2015 with scores of 2-3 in GHC 4-4706.
+We started at 04:20:34
+I am awake from 6 am every morning until 7:30pm at night.
+I am awake from 6am every morning until 7:30 pm at night.
+During the 60s, 70's and 00s (or is it the 00's) we were based at the 90s Cafe.
+
+# Hand-picked coverage of the normalisation and analysis paths.
+The quick brown fox jumps over the lazy dog.
+Is this a question?
+In 1984, they spent $1,500.25 on 3 books.
+Dr. Smith lives at 123 Main St. in Pittsburgh, PA 15213.
+Call me at 555-1234 before 9:30am.
+Antidisestablishmentarianism is a very long word.
+NASA and the FBI disagree; nevertheless, we continue.
+She read the book, then she will read it again.
+The bookkeeper's records show 42.5 percent growth.
+Hello world
+A
+I have 1 dollar and 2 cents.
+It costs $0.99 or $1,000,000.
+Chapter IV begins on page 302.
+King Henry VIII had six wives.
+The meeting is at 12:05 pm on 3/4.
+Call 412-268-2000 now.
+E.g. the U.S.A. and the U.K.
+They'll say we've done what he'd do.
+Mr. and Mrs. Jones, of 5 Elm St.
+60s music, 1990s fashion.
+x y z q w
+aaa bbb ccc
+The 21st of March, 1999.
+5kg of flour and 10 MB of data.
+Wow!!! Really??? Yes...
+one-two-three
+co-operate with the ex-wife
+22-23 November
+1998-1999 was a good year.
+HTTP and XML and SQL
+Pittsburgh, PA 15213
+He read a book; she will read it.
+1/2 and 3/4 and 7/4
+100% of 42.5% growth
+i.e. that is
+The cat sat on the mat, and then it slept.
+Supercalifragilisticexpialidocious!
+zzz qqq xxx
+0123456789
+First sentence. Second sentence! Third one?
+Hello there. How are you today? I am fine, thanks.
+The price was $1,500.25 exactly.
+Dr. Smith went to Washington. He stayed a week.
+
+# Generated sentences: real words, random lengths, all three terminators.
+# These stress the counting features, which saturate on long sentences.
+Then queue university quick.
+Carnegie then.
+Jumps queue!
+Research speech fox brown jumps laboratory terrible the laboratory queue.
+Terrible said she rhythm wonderful phonetics said intonation.
+She.
+Fox the synthesizer?
+Rhythm incredibly.
+Lazy rhythm!
+University!
+Mellon said lazy zebra speech jumps synthesizer queue!
+Brown then synthesizer she Pittsburgh!
+Phonetics tomorrow Pittsburgh Pittsburgh?
+Lazy research and xylophone and incredibly bookkeeper yesterday brown!
+Mellon hello Carnegie wonderful synthesis wonderful research?
+Speech said university!
+Hello xylophone intonation the hello!
+Then xylophone terrible hello Mellon dog synthesis over Carnegie jumps Pittsburgh.
+Brown bookkeeper dog queue Pittsburgh.
+Over then breakfast jumps phonetics rhythm?
+Tomorrow terrible research hello and intonation queue said rhythm laboratory?
+Phonetics Mellon jumps incredibly.
+Tomorrow breakfast Mellon wonderful she.
+Then laboratory the she.
+Quick lazy yesterday and quick university she?
+The zebra Mellon.
+And laboratory Pittsburgh world Carnegie queue bookkeeper?
+Then terrible!
+Pittsburgh yesterday xylophone Carnegie bookkeeper said zebra breakfast synthesizer breakfast lazy university!
+And hello.
+Fox then xylophone university and terrible zebra jumps zebra xylophone bookkeeper incredibly!
+Incredibly terrible she jumps over queue.
+Speech said.
+Wonderful wonderful.
+Breakfast xylophone Carnegie terrible rhythm hello.
+Bookkeeper over she speech world phonetics she rhythm bookkeeper dog quick then?
+Quick.
+Tomorrow research?
+She breakfast she intonation she xylophone over Mellon then zebra synthesizer!
+She quick?
+Terrible.
+University research?
+Over Carnegie the queue fox hello computer xylophone incredibly.
+University synthesizer lazy the breakfast breakfast brown jumps breakfast tomorrow the research!
+Bookkeeper.
+Tomorrow incredibly bookkeeper Mellon!
+Carnegie laboratory the world intonation world university breakfast Carnegie university synthesis!
+Computer lazy said and Mellon said lazy phonetics phonetics.
+The jumps laboratory intonation and phonetics queue breakfast?
+Speech!
+Bookkeeper world brown quick research yesterday Mellon the synthesis phonetics world.
+And hello she brown lazy computer Carnegie yesterday computer lazy yesterday?
+Computer synthesis speech terrible Pittsburgh then fox.
+World rhythm?
+Synthesizer rhythm Mellon fox tomorrow?
+Phonetics rhythm rhythm breakfast quick tomorrow quick fox Pittsburgh said jumps queue.
+Speech rhythm zebra yesterday university breakfast over and quick Pittsburgh then and!
+Then incredibly university?
+The speech terrible incredibly.
+Yesterday quick hello phonetics wonderful synthesizer intonation speech the research rhythm.
+Computer zebra she and over jumps bookkeeper.
+Incredibly then zebra computer yesterday tomorrow Mellon wonderful zebra dog dog?
+Incredibly intonation world yesterday dog Pittsburgh hello world.
+Breakfast terrible.
+Quick?
+Speech.
+Synthesis speech queue dog terrible university Mellon xylophone breakfast.
+Synthesis tomorrow?
+Intonation she jumps quick fox.
+Jumps the terrible laboratory terrible fox rhythm?
+Rhythm and speech university zebra incredibly?
+Research laboratory university and world and Carnegie quick Pittsburgh breakfast breakfast?
+Computer hello university dog over?
+Fox breakfast over Mellon wonderful and dog university over!
+Terrible intonation and dog synthesizer and xylophone the fox yesterday speech!
+Incredibly said!
+Speech synthesis research then synthesis tomorrow?
+Quick university breakfast synthesis!
+Research university synthesis world.
+Speech quick computer and computer Carnegie yesterday zebra Mellon phonetics said yesterday.
+Tomorrow queue yesterday.
+And speech Carnegie intonation tomorrow Carnegie Carnegie breakfast.
+Pittsburgh brown intonation lazy wonderful rhythm bookkeeper phonetics!
+Synthesis university then!
+Computer over and.
+Rhythm jumps Pittsburgh dog tomorrow terrible incredibly incredibly incredibly!
+Brown.
+She synthesizer dog Mellon yesterday wonderful computer terrible.
+Dog incredibly she bookkeeper!
+And she and bookkeeper Pittsburgh zebra said computer?
+Research.
+Speech synthesis tomorrow university incredibly jumps hello the!
+Hello breakfast zebra and synthesis the Mellon and university!
+Laboratory Carnegie speech lazy and over the over!
+Laboratory.
+Rhythm intonation phonetics fox and then yesterday computer laboratory jumps!
+And then fox.
+And she quick?
+Dog Mellon xylophone dog laboratory lazy synthesis.
+Wonderful computer xylophone.
+Quick university university lazy speech said computer Pittsburgh hello world!
+Synthesizer and jumps zebra speech then said and lazy incredibly.
+Queue synthesis phonetics world wonderful dog synthesis research Carnegie.
+Intonation computer phonetics hello zebra zebra!
+Hello jumps Pittsburgh incredibly incredibly.
+Xylophone lazy?
+Speech fox fox world jumps then over lazy.
+Jumps speech she intonation brown the Carnegie and brown zebra incredibly terrible!
+Then tomorrow she tomorrow zebra intonation said.
+Terrible and Mellon Carnegie fox hello lazy zebra dog queue wonderful queue!
+Jumps zebra Pittsburgh lazy phonetics.
+Rhythm jumps laboratory speech bookkeeper brown tomorrow phonetics.
+Then she and hello research then and breakfast phonetics Carnegie incredibly laboratory!
+Tomorrow fox she terrible fox then over breakfast?
+Xylophone research?
+University Pittsburgh queue laboratory tomorrow over Carnegie computer Mellon Pittsburgh she fox.
+Rhythm Carnegie and then Carnegie the tomorrow synthesis yesterday!
+Speech Mellon.
+Jumps bookkeeper then Pittsburgh xylophone tomorrow lazy research breakfast synthesis she terrible.
+Carnegie jumps zebra fox synthesis and synthesis then!
+
+# Generated numbers, money and percentages in a fixed frame.
+The value is 826117 and 1614st.
+The value is 864797 and 240%.
+The value is 57754 and 2693%.
+The value is 18269 and 706.
+The value is 754016 and 568 percent.
+The value is 372972 and 622.
+The value is 821916 and 665st.
+The value is 289735 and 769%.
+The value is 746937 and 677 percent.
+The value is 312478 and 230 percent.
+The value is 287229 and 1543%.
+The value is 985716 and 2346%.
+The value is 139156 and 2728 percent.
+The value is 705284 and 1075st.
+The value is $753702 and 635%.
+The value is 462471 and 2909 percent.
+The value is $685672 and 1291st.
+The value is 414209 and 1989 percent.
+The value is $650079 and 283 percent.
+The value is 460191 and 1476 percent.
+The value is 62923 and 426 percent.
+The value is $616614 and 42.
+The value is $458944 and 95%.
+The value is 59959 and 1486%.
+The value is 83370 and 702 percent.
+The value is 192657 and 222%.
+The value is 456360 and 1629.
+The value is $177342 and 867st.
+The value is 362839 and 1562.
+The value is 112540 and 2891%.
+The value is $116523 and 1789st.
+The value is 466950 and 1048.
+The value is 539926 and 1009st.
+The value is 544715 and 2946.
+The value is 199762 and 2045.
+The value is 113376 and 1817st.
+The value is $268859 and 669 percent.
+The value is 317833 and 2582.
+The value is 616045 and 2889.
+The value is $740949 and 1576st.
+
+# Nonsense words, which force the letter-to-sound rules.
+xd.
+chfe.
+xufqkfa.
+aezlufw.
+imumxm.
+bcunrc.
+lzsjcus.
+apf.
+eei.
+vgi.
+wvapq.
+ibr.
+dzvbkm.
+sirz.
+aphupqevf.
+tzhbefvdt.
+cavuaqeq.
+hxfrk.
+gs.
+zogcsnwgy.
+
+# Nonsense letter strings, which are spelled out or said as words.
+FRNNE.
+APXLC.
+CP.
+LW.
+MTR.
+BP.
+OUZXW.
+VZWUO.
+DMO.
+TS.
+QDU.
+HXU.
+EHF.
+SZF.
+ILKT.
+MKZTF.
+KUQ.
+QGQ.
+QGZ.
+OE.
+
+# Further coverage: state and place abbreviations, units, ordinals,
+# fractions, dates, and sentences that mix terminators.
+The parcel went from Wilmington, DE to Sault Ste. Marie, MI via Ft. Worth, TX.
+Mt. Rainier is in WA, not in Wash. or in D.C.
+It weighs 3.5 lbs, holds 2 gal, and runs 60 mph for 12 hrs.
+Add 250 mg to 1.5 L of water at 37 degrees C.
+She finished 2nd, he finished 43rd, and I finished 101st.
+Take 1/3 of a cup, then 2 1/2 tablespoons, then 15/16 of an inch.
+On Jan. 3, 1985, and again on 12/25/99, and once more in Feb 2001.
+The 1st of Sept. 1939 was a Friday.
+Was it Dr. Smith? No! It was Prof. Jones, of course.
+Why now? Because 42% of them left. That is why.
+Room #5 costs $3 and seat 7A costs $12.50.
+AT&T and R&D and P&L reports.

@@ -207,6 +207,59 @@ fn a_shared_engine_can_be_used_from_several_threads() {
 }
 
 #[test]
+fn a_segment_can_see_the_token_it_came_from() {
+    // The per-token prosody overrides in the duration and F0 models are read
+    // through these paths. Nothing sets those features yet, so they would read
+    // as absent whether the walk worked or not; check the walk itself with a
+    // feature that does have a value.
+    let e = engine();
+    let utt = e.analyse("Hello there.");
+    let segment = utt
+        .iter_relation("Segment")
+        .nth(1)
+        .expect("the utterance has segments after the leading silence");
+
+    assert_eq!(
+        flite_rs::ffeature::eval_str(
+            &utt,
+            segment,
+            "R:SylStructure.parent.parent.R:Token.parent.name"
+        )
+        .as_str(),
+        "Hello"
+    );
+    // The F0 model walks from a syllable, one step shorter.
+    let syllable = utt
+        .iter_relation("Syllable")
+        .next()
+        .expect("the utterance has syllables");
+    assert_eq!(
+        flite_rs::ffeature::eval_str(&utt, syllable, "R:SylStructure.parent.R:Token.parent.name")
+            .as_str(),
+        "Hello"
+    );
+}
+
+#[test]
+fn voice_parameters_are_reachable_and_take_effect() {
+    let mut e = engine();
+    // The convenience setter works in multiples of the voice's own rate, so
+    // its 1.0 is the voice's 1.1.
+    assert_eq!(e.params().duration_stretch, 1.1);
+    e.set_duration_stretch(2.0);
+    assert_eq!(e.params().duration_stretch, 2.2);
+
+    e.set_duration_stretch(1.0);
+    let normal = e.synthesize("Parameters.").samples.len();
+    e.params_mut().duration_stretch = 2.2;
+    assert!(e.synthesize("Parameters.").samples.len() > normal);
+
+    // Selecting units without generating audio.
+    e.params_mut().join_type = flite_rs::JoinType::None;
+    assert!(e.synthesize("Parameters.").samples.is_empty());
+}
+
+#[test]
 fn synthesis_is_deterministic() {
     let e = engine();
     let text = "Determinism matters for testing.";

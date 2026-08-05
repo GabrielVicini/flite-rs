@@ -6,10 +6,12 @@
 //! all-pole filter the coefficients describe; stretching or compressing the
 //! spacing of the pitch periods is what changes pitch and duration.
 //!
-//! The arithmetic here is deliberately integer-only. That is not nostalgia:
-//! it makes output bit-identical on every target regardless of floating-point
-//! settings, and it is measurably faster than the float path on machines
-//! without fast FPUs, which is the portability promise this crate inherits.
+//! The arithmetic on the default path is deliberately integer-only. That is
+//! not nostalgia: it makes output bit-identical on every target regardless of
+//! floating-point settings, and it is measurably faster than the float path on
+//! machines without fast FPUs, which is the portability promise this crate
+//! inherits. [`lpc_resynthesise_float`] exists because upstream offers it and
+//! some voices ask for it; nothing bundled here does.
 
 /// µ-law byte to 16-bit linear sample (ITU-T G.711).
 pub fn ulaw_to_i16(byte: u8) -> i16 {
@@ -425,6 +427,57 @@ pub fn lpc_resynthesise(
                 tap = if tap == 0 { order } else { tap - 1 };
             }
             acc /= LPC_SCALE;
+            history[head] = acc;
+            samples.push(acc as i16);
+            head = if head == order { 0 } else { head + 1 };
+            position += 1;
+        }
+    }
+    samples
+}
+
+/// The same filter in floating point, which is upstream's `lpc_resynth`.
+///
+/// Only reachable through [`crate::voice::ResynthType::Float`]. Unlike
+/// [`lpc_resynthesise`] the result depends on the target's floating-point
+/// behaviour, and a sample that overflows saturates here where upstream's cast
+/// is undefined, so the two agree on speech but need not agree on a signal
+/// driven past full scale.
+pub fn lpc_resynthesise_float(
+    quantised: &[u16],
+    sizes: &[usize],
+    residual: &[u8],
+    coeff_min: f32,
+    coeff_range: f32,
+    order: usize,
+) -> Vec<i16> {
+    let total: usize = sizes.iter().sum();
+    let mut samples = Vec::with_capacity(total);
+
+    let mut history = vec![0f32; order + 1];
+    let mut head = order;
+    let mut coefficients = vec![0f32; order];
+    let mut position = 0usize;
+
+    for (i, &size) in sizes.iter().enumerate() {
+        let frame = &quantised[i * order..(i + 1) * order];
+        for (k, coefficient) in coefficients.iter_mut().enumerate() {
+            *coefficient =
+                (f64::from(frame[k]) / 65535.0 * f64::from(coeff_range)) as f32 + coeff_min;
+        }
+
+        for _ in 0..size {
+            if position >= residual.len() {
+                break;
+            }
+            // As in the fixed-point filter, the history is not cleared at a
+            // period boundary.
+            let mut acc = f32::from(ulaw_to_i16(residual[position]));
+            let mut tap = if head == 0 { order } else { head - 1 };
+            for coefficient in &coefficients {
+                acc += coefficient * history[tap];
+                tap = if tap == 0 { order } else { tap - 1 };
+            }
             history[head] = acc;
             samples.push(acc as i16);
             head = if head == order { 0 } else { head + 1 };

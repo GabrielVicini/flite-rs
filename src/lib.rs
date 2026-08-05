@@ -69,9 +69,8 @@ pub mod value;
 pub mod voice;
 pub mod wav;
 
-pub use pipeline::Prosody;
 pub use utterance::Utterance;
-pub use voice::{Audio, Voice};
+pub use voice::{Audio, JoinType, ResynthType, Voice, VoiceParams};
 pub use wav::write_wav;
 
 use language::Language;
@@ -98,7 +97,7 @@ const DEFAULT_F0_STDDEV: f32 = 11.0;
 pub struct Engine {
     language: Language,
     voice: Voice,
-    prosody: Prosody,
+    params: VoiceParams,
 }
 
 impl Engine {
@@ -118,24 +117,42 @@ impl Engine {
         Ok(Engine {
             language: Language::parse(EN_US_DATA)?,
             voice: Voice::parse(KAL_VOICE_DATA)?,
-            prosody: Prosody {
+            params: VoiceParams {
+                int_f0_target_mean: DEFAULT_F0_MEAN,
+                int_f0_target_stddev: DEFAULT_F0_STDDEV,
                 duration_stretch: VOICE_DURATION_STRETCH,
                 f0_shift: 1.0,
-                f0_mean: DEFAULT_F0_MEAN,
-                f0_stddev: DEFAULT_F0_STDDEV,
+                join_type: JoinType::ModifiedLpc,
+                resynth_type: ResynthType::Fixed,
             },
         })
     }
 
     /// Speech rate, where 1.0 is the voice's natural rate. Values above 1.0
     /// lengthen every segment.
+    ///
+    /// This multiplies the voice's own stretch rather than replacing it, so
+    /// 1.0 here is not 1.0 in [`VoiceParams::duration_stretch`]. Set that field
+    /// directly through [`Engine::params_mut`] to work in upstream's units.
     pub fn set_duration_stretch(&mut self, stretch: f32) {
-        self.prosody.duration_stretch = stretch.max(0.05) * VOICE_DURATION_STRETCH;
+        self.params.duration_stretch = stretch.max(0.05) * VOICE_DURATION_STRETCH;
     }
 
     /// Pitch multiplier applied to the target mean; 1.0 leaves it unchanged.
     pub fn set_f0_shift(&mut self, shift: f32) {
-        self.prosody.f0_shift = shift.max(0.1);
+        self.params.f0_shift = shift.max(0.1);
+    }
+
+    /// The voice parameters in full, for settings the two helpers above do not
+    /// cover.
+    pub fn params(&self) -> &VoiceParams {
+        &self.params
+    }
+
+    /// The voice parameters, mutably. Values are used as given: unlike
+    /// [`Engine::set_duration_stretch`] nothing is clamped or rescaled.
+    pub fn params_mut(&mut self) -> &mut VoiceParams {
+        &mut self.params
     }
 
     /// The sample rate of everything this engine produces.
@@ -151,8 +168,8 @@ impl Engine {
     pub fn synthesize(&self, text: &str) -> Audio {
         let mut samples = Vec::new();
         for sentence in text::tokenize(text) {
-            let utt = pipeline::analyse(&self.language, &sentence, &self.prosody);
-            samples.extend(voice::synthesise(&self.voice, &utt).samples);
+            let utt = pipeline::analyse(&self.language, &sentence, &self.params);
+            samples.extend(voice::synthesise(&self.voice, &utt, &self.params).samples);
         }
         Audio {
             samples,
@@ -168,7 +185,7 @@ impl Engine {
         text::tokenize(text)
             .iter()
             .map(|sentence| {
-                let utt = pipeline::analyse(&self.language, sentence, &self.prosody);
+                let utt = pipeline::analyse(&self.language, sentence, &self.params);
                 pipeline::phone_string(&utt)
             })
             .collect::<Vec<_>>()
@@ -182,7 +199,7 @@ impl Engine {
     /// [`text::tokenize`] first if that is not what you want.
     pub fn analyse(&self, text: &str) -> Utterance {
         let tokens: Vec<text::Token> = text::tokenize(text).into_iter().flatten().collect();
-        pipeline::analyse(&self.language, &tokens, &self.prosody)
+        pipeline::analyse(&self.language, &tokens, &self.params)
     }
 }
 

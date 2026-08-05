@@ -1,0 +1,11 @@
+flite-rs
+Copyright 2026 flite-rs contributors
+
+This product includes speech data developed by Carnegie Mellon University
+and, in part, jointly by Carnegie Mellon University and the University of
+Edinburgh. See THIRD-PARTY-LICENSES.md for the full terms, the list of
+affected files, and the modifications that were made.
+
+The Rust source code in this distribution is an independent implementation
+licensed under the Apache License, Version 2.0 (see LICENSE). It is not
+derived from the source code of any other speech synthesis system.

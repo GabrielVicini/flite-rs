@@ -9,3 +9,7 @@
 # Python bytecode from tools/
 __pycache__/
 *.pyc
+
+# The upstream Flite reference build, which is produced locally from a source
+# tree this repository does not carry.
+/tools/reference/build/

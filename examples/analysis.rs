@@ -29,7 +29,8 @@ fn main() {
     println!("SYLLABLES");
     for syl in utt.iter_relation("Syllable") {
         println!(
-            "stress={} accent={} endtone={}",
+            "{} stress={} accent={} endtone={}",
+            flite_rs::ffeature::eval_str(&utt, syl, "R:SylStructure.parent.name"),
             or_default(utt.feature_str(syl, "stress")),
             or_default(utt.feature_str(syl, "accent")),
             or_default(utt.feature_str(syl, "endtone")),

@@ -129,6 +129,74 @@ struct Unit {
     target_end: usize,
 }
 
+/// How the selected units are turned into a waveform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinType {
+    /// Select units but generate nothing, for analysing without paying for the
+    /// audio. Upstream accepts the value but leaves the utterance without a
+    /// waveform, so its own callers cannot use it; here the result is empty
+    /// audio.
+    None,
+    /// Concatenate the recorded pitch periods unchanged. The recorded pitch
+    /// and timing survive and the predicted contour is ignored, so this sounds
+    /// like the original speaker reading the diphones.
+    Simple,
+    /// Respace the periods onto the predicted pitch contour, which is what
+    /// makes the voice say something it never recorded.
+    ModifiedLpc,
+}
+
+/// Which arithmetic the LPC synthesis filter uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResynthType {
+    /// Integer throughout, so the output is identical on every target. Every
+    /// voice this crate ships asks for this.
+    Fixed,
+    /// Floating point. Upstream's default for a modified-LPC join, and subject
+    /// to the target's floating-point behaviour.
+    ///
+    /// Samples match upstream exactly, but the length does not: upstream sizes
+    /// this path's output from the last pitch mark and, unlike its fixed-point
+    /// filter, never trims it back to what was generated, so it returns up to
+    /// an eighth of a second of trailing silence. That is not reproduced here.
+    Float,
+}
+
+/// The parameters upstream Flite exposes as features on a voice.
+///
+/// The field names are upstream's, so that a value here can be checked against
+/// the `register_*` function it was taken from without a translation step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VoiceParams {
+    /// Mean pitch in Hz. The intonation model's predictions are mapped onto
+    /// this and [`Self::int_f0_target_stddev`].
+    pub int_f0_target_mean: f32,
+    /// Pitch spread in Hz around that mean.
+    pub int_f0_target_stddev: f32,
+    /// Multiplies every segment duration; above 1.0 is slower speech. A voice
+    /// sets this to suit its own recordings, so it is rarely 1.0.
+    pub duration_stretch: f32,
+    /// Multiplies the pitch mean; above 1.0 is a higher voice.
+    pub f0_shift: f32,
+    pub join_type: JoinType,
+    pub resynth_type: ResynthType,
+}
+
+impl Default for VoiceParams {
+    /// Upstream's fallbacks for a voice that sets nothing, not the bundled
+    /// voice's values. [`crate::Engine`] starts from the voice's own.
+    fn default() -> VoiceParams {
+        VoiceParams {
+            int_f0_target_mean: 100.0,
+            int_f0_target_stddev: 12.0,
+            duration_stretch: 1.0,
+            f0_shift: 1.0,
+            join_type: JoinType::ModifiedLpc,
+            resynth_type: ResynthType::Float,
+        }
+    }
+}
+
 /// Synthesised audio.
 #[derive(Clone, Debug)]
 pub struct Audio {
@@ -143,26 +211,38 @@ impl Audio {
 }
 
 /// Generate the waveform for a fully analysed utterance.
-pub fn synthesise(voice: &Voice, utt: &Utterance) -> Audio {
-    let units = select_units(voice, utt);
-    let pitch_marks = pitch_marks(voice, utt);
-    if units.is_empty() || pitch_marks.len() < 2 {
-        return Audio {
-            samples: Vec::new(),
-            sample_rate: voice.sample_rate,
-        };
+pub fn synthesise(voice: &Voice, utt: &Utterance, params: &VoiceParams) -> Audio {
+    let silence = Audio {
+        samples: Vec::new(),
+        sample_rate: voice.sample_rate,
+    };
+    if params.join_type == JoinType::None {
+        return silence;
     }
+
+    let mut units = select_units(voice, utt);
+    let pitch_marks = match params.join_type {
+        JoinType::Simple => natural_pitch_marks(voice, &mut units),
+        _ => pitch_marks(voice, utt),
+    };
+    if units.is_empty() || pitch_marks.len() < 2 {
+        return silence;
+    }
+
     let (coefficients, sizes, residual) = build_excitation(voice, &units, &pitch_marks);
-    let samples = dsp::lpc_resynthesise(
-        &coefficients,
-        &sizes,
-        &residual,
-        voice.coeff_min,
-        voice.coeff_range,
-        voice.order,
-    );
+    let resynthesise = match params.resynth_type {
+        ResynthType::Fixed => dsp::lpc_resynthesise,
+        ResynthType::Float => dsp::lpc_resynthesise_float,
+    };
     Audio {
-        samples,
+        samples: resynthesise(
+            &coefficients,
+            &sizes,
+            &residual,
+            voice.coeff_min,
+            voice.coeff_range,
+            voice.order,
+        ),
         sample_rate: voice.sample_rate,
     }
 }
@@ -259,6 +339,25 @@ fn pitch_marks(voice: &Voice, utt: &Utterance) -> Vec<usize> {
         }
         last_f0 = f0;
         last_position = position;
+    }
+    marks
+}
+
+/// Pitch marks that keep the recorded timing: one per source period, spaced by
+/// that period's own length.
+///
+/// Each unit's target is rewritten to where it naturally lands, which makes the
+/// resampling in [`build_excitation`] an identity and leaves the recorded pitch
+/// untouched.
+fn natural_pitch_marks(voice: &Voice, units: &mut [Unit]) -> Vec<usize> {
+    let mut marks = Vec::new();
+    let mut position = 0usize;
+    for unit in units {
+        for period in unit.first_period..unit.last_period {
+            position += voice.period_samples(period);
+            marks.push(position);
+        }
+        unit.target_end = position;
     }
     marks
 }

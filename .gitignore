@@ -1,0 +1,11 @@
+/target
+
+# Synthesis output; the CLI writes out.wav by default.
+*.wav
+
+# Editor and IDE state.
+/.idea
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc

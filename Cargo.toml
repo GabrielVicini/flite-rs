@@ -1,0 +1,34 @@
+[package]
+name = "flite-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "Apache-2.0"
+description = "Small, fast, text to speech. A clean-room Rust implementation of the Flite and Festival diphone synthesis techniques, bit-identical to upstream Flite."
+homepage = "https://github.com/GabrielVicini/flite-rs"
+repository = "https://github.com/GabrielVicini/flite-rs"
+readme = "README.md"
+keywords = ["tts", "speech", "synthesis", "audio", "diphone"]
+categories = ["multimedia::audio", "text-processing"]
+
+[lib]
+name = "flite_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flite-rs"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# The CLI front-end; without it the library builds with zero dependencies.
+cli = ["dep:clap"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

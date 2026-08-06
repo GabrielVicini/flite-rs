@@ -8,6 +8,8 @@ rule-based letter-to-sound, and residual-excited LPC waveform generation. No C,
 no FFI, no `build.rs`, no `unsafe`. The models and the voice are embedded in the
 binary, so there is nothing to install and nothing to load at runtime.
 
+Feel free to check out the [WebAssembly live demo](https://flite-rs.vicini.io/).
+
 Ships with `cmu_us_kal` (8 kHz, male, US English), optionally the same speaker
 at 16 kHz, and US English text handling.
 

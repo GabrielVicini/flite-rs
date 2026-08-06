@@ -17,11 +17,19 @@ On Windows that means the Visual Studio C++ toolchain; elsewhere any `cc`.
 python tools/reference/build.py --flite-src PATH/TO/flite
 ```
 
-This writes `reffile` and `refdump` into `tools/reference/build`, which is
-ignored by git. Object files are cached there, so a second run is quick.
+This writes `reffile`, `refdump` and `refphones` into `tools/reference/build`,
+which is ignored by git. Object files are cached there, so a second run is
+quick.
+
+  `reffile`    text file in, WAV out. Trailing `NAME=VALUE` arguments set voice
+               features, and `voice=kal16` picks the 16 kHz voice, which is how
+               the paths a voice does not ask for by itself get exercised.
+  `refdump`    the linguistic structure of one sentence. `-p` reads it as
+               phones, `-u` adds the selected units and output pitch marks.
+  `refphones`  a phone string in, WAV out.
 
 Upstream's own `flite_main.c` is not used: it includes `<sys/time.h>` and
-`<unistd.h>`, which MSVC does not have. The two small drivers here replace it.
+`<unistd.h>`, which MSVC does not have. The small drivers here replace it.
 
 ## Running the comparison
 
@@ -30,8 +38,11 @@ cargo test --release --test reference
 ```
 
 The test synthesises every line of `corpus.txt` with both engines and requires
-every sample to match. Without the reference binary it reports that it was
-skipped and passes, so a plain checkout still runs green.
+every sample to match. It also feeds the whole corpus through as a single file,
+which is the only thing that exercises a chunk boundary inside a token or a
+sentence break across one. Add `--features kal16` to check the 16 kHz voice too.
+Without the reference binary the tests report that they were skipped and pass,
+so a plain checkout still runs green.
 
 `reffile` uses `flite_file_to_speech`, not `flite_text_to_speech`. The former
 splits its input into sentences, which is what `Engine::synthesize` does; the
@@ -58,10 +69,18 @@ order the stages run, and stop at the first one that differs.
 1 to 3 are a plain diff:
 
 ```bash
-tools/reference/build/refdump "The quick brown fox." > /tmp/ref.txt
-cargo run --release --example analysis -- "The quick brown fox." > /tmp/ours.txt
-diff /tmp/ref.txt /tmp/ours.txt
+tools/reference/build/refdump "The quick brown fox." > ref.txt
+cargo run --release --example analysis -- "The quick brown fox." > ours.txt
+diff ref.txt ours.txt
 ```
+
+Both take `voice=NAME` and `-p`, and they must agree: analysing with the wrong
+voice produces a difference that is entirely your own doing, because the
+postlexical rules and the pitch range belong to the voice.
+
+If those sections agree and the audio still differs, the divergence is in unit
+selection or in the pitch marks. `refdump -u` prints both, and the engine will
+print its own if `FLITE_DEBUG_UNITS` is set.
 
 `refdump` synthesises its argument as a single utterance, so give it one
 sentence. For anything longer, compare audio with `reffile`.

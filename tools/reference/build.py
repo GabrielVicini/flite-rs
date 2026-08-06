@@ -1,7 +1,7 @@
 """Build the upstream Flite reference binaries that flite-rs is verified against.
 
 The bit-exactness claim only means something if it is checked against a real
-Flite build, so this compiles one from an upstream source tree. Two binaries
+Flite build, so this compiles one from an upstream source tree. Three binaries
 come out of it:
 
   reffile   text file in, WAV out. This is what the corpus test compares
@@ -9,6 +9,7 @@ come out of it:
   refdump   segments, syllables and pitch targets for one sentence, in the
             format `cargo run --example analysis` prints, for bisecting a
             divergence.
+  refphones a phone string in, WAV out, for the path that skips text analysis.
 
 Upstream ships no build system that produces these, and its own driver does not
 compile with MSVC, so the source list is assembled here instead.
@@ -45,6 +46,7 @@ SOURCE_DIRS = [
     "lang/cmulex",
     "lang/usenglish",
     "lang/cmu_us_kal",
+    "lang/cmu_us_kal16",
 ]
 
 # The rest of src/audio is platform-specific output drivers, which the file
@@ -74,7 +76,9 @@ EXCLUDED = {
 
 INCLUDE_DIRS = ["include", "lang/usenglish", "lang/cmulex", "lang/cmu_us_kal"]
 
-DRIVERS = ["reffile.c", "refdump.c"]
+# Both voices are linked in, so the reference can be asked for either.
+
+DRIVERS = ["reffile.c", "refdump.c", "refphones.c"]
 
 HERE = Path(__file__).resolve().parent
 

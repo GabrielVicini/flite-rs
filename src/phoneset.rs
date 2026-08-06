@@ -112,6 +112,12 @@ pub fn feature(phone: &str, name: &str) -> &'static str {
     }
 }
 
+/// The inventory's own name for a phone, for callers that need one that
+/// outlives their input. `None` if it is not a phone this engine knows.
+pub fn name(phone: &str) -> Option<&'static str> {
+    phone_id(phone).map(|id| PHONES[id].name)
+}
+
 /// Whether `phone` is a vowel.
 pub fn is_vowel(phone: &str) -> bool {
     feature_by_index(phone, 0) == "+"

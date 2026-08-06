@@ -13,6 +13,16 @@
 //! inherits. [`lpc_resynthesise_float`] exists because upstream offers it and
 //! some voices ask for it; nothing bundled here does.
 
+/// Whether a streaming consumer wants the rest of the audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flow {
+    Continue,
+    /// Abandon this utterance. Synthesis of what remains never happens, which
+    /// is the point: a listener who has stopped listening should not be paid
+    /// for.
+    Stop,
+}
+
 /// µ-law byte to 16-bit linear sample (ITU-T G.711).
 pub fn ulaw_to_i16(byte: u8) -> i16 {
     const EXPONENT_BIAS: [i32; 8] = [0, 132, 396, 924, 1980, 4092, 8316, 16764];
@@ -396,9 +406,33 @@ pub fn lpc_resynthesise(
     coeff_range: f32,
     order: usize,
 ) -> Vec<i16> {
-    let total: usize = sizes.iter().sum();
-    let mut samples = Vec::with_capacity(total);
+    collect(sizes, |sink| {
+        lpc_resynthesise_streaming(
+            quantised,
+            sizes,
+            residual,
+            coeff_min,
+            coeff_range,
+            order,
+            sink,
+        )
+    })
+}
 
+/// The same filter, handing each pitch period to `sink` as it is finished
+/// rather than accumulating the whole utterance.
+///
+/// Stops early if the sink asks it to, which is how a caller that is playing
+/// the audio aborts without synthesising the rest.
+pub fn lpc_resynthesise_streaming(
+    quantised: &[u16],
+    sizes: &[usize],
+    residual: &[u8],
+    coeff_min: f32,
+    coeff_range: f32,
+    order: usize,
+    sink: &mut dyn FnMut(&[i16]) -> Flow,
+) {
     let min_q = (coeff_min * 32768.0) as i32;
     // The range is known to stay well inside ±16, so 2048 is a safe scale.
     let range_q = (coeff_range * 2048.0) as i32;
@@ -408,6 +442,7 @@ pub fn lpc_resynthesise(
     let mut head = order;
     let mut coefficients = vec![0i32; order];
     let mut position = 0usize;
+    let mut period = Vec::new();
 
     for (i, &size) in sizes.iter().enumerate() {
         let frame = &quantised[i * order..(i + 1) * order];
@@ -416,6 +451,7 @@ pub fn lpc_resynthesise(
             *coefficient = ((q / 2 * range_q) / 2048 + min_q) / 2;
         }
 
+        period.clear();
         for _ in 0..size {
             if position >= residual.len() {
                 break;
@@ -428,12 +464,14 @@ pub fn lpc_resynthesise(
             }
             acc /= LPC_SCALE;
             history[head] = acc;
-            samples.push(acc as i16);
+            period.push(acc as i16);
             head = if head == order { 0 } else { head + 1 };
             position += 1;
         }
+        if sink(&period) == Flow::Stop {
+            return;
+        }
     }
-    samples
 }
 
 /// The same filter in floating point, which is upstream's `lpc_resynth`.
@@ -451,13 +489,34 @@ pub fn lpc_resynthesise_float(
     coeff_range: f32,
     order: usize,
 ) -> Vec<i16> {
-    let total: usize = sizes.iter().sum();
-    let mut samples = Vec::with_capacity(total);
+    collect(sizes, |sink| {
+        lpc_resynthesise_float_streaming(
+            quantised,
+            sizes,
+            residual,
+            coeff_min,
+            coeff_range,
+            order,
+            sink,
+        )
+    })
+}
 
+/// [`lpc_resynthesise_float`], one pitch period at a time.
+pub fn lpc_resynthesise_float_streaming(
+    quantised: &[u16],
+    sizes: &[usize],
+    residual: &[u8],
+    coeff_min: f32,
+    coeff_range: f32,
+    order: usize,
+    sink: &mut dyn FnMut(&[i16]) -> Flow,
+) {
     let mut history = vec![0f32; order + 1];
     let mut head = order;
     let mut coefficients = vec![0f32; order];
     let mut position = 0usize;
+    let mut period = Vec::new();
 
     for (i, &size) in sizes.iter().enumerate() {
         let frame = &quantised[i * order..(i + 1) * order];
@@ -466,6 +525,7 @@ pub fn lpc_resynthesise_float(
                 (f64::from(frame[k]) / 65535.0 * f64::from(coeff_range)) as f32 + coeff_min;
         }
 
+        period.clear();
         for _ in 0..size {
             if position >= residual.len() {
                 break;
@@ -479,11 +539,26 @@ pub fn lpc_resynthesise_float(
                 tap = if tap == 0 { order } else { tap - 1 };
             }
             history[head] = acc;
-            samples.push(acc as i16);
+            period.push(acc as i16);
             head = if head == order { 0 } else { head + 1 };
             position += 1;
         }
+        if sink(&period) == Flow::Stop {
+            return;
+        }
     }
+}
+
+/// Run a streaming filter and keep everything it produces.
+///
+/// The buffered forms are written in terms of the streaming ones so that the
+/// two cannot drift apart: there is only one filter.
+fn collect(sizes: &[usize], run: impl FnOnce(&mut dyn FnMut(&[i16]) -> Flow)) -> Vec<i16> {
+    let mut samples = Vec::with_capacity(sizes.iter().sum());
+    run(&mut |period| {
+        samples.extend_from_slice(period);
+        Flow::Continue
+    });
     samples
 }
 

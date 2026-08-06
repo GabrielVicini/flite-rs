@@ -21,7 +21,7 @@ const OP_LESS: u8 = 2;
 const OP_GREATER: u8 = 3;
 const OP_LEAF: u8 = 255;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node {
     feature: u8,
     op: u8,
@@ -29,7 +29,7 @@ struct Node {
     value: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cart {
     features: Vec<FeaturePath>,
     values: Vec<Value>,

@@ -61,12 +61,42 @@ static ADDENDA: &[(char, &str, &[&str])] = &[
 /// Entries are stored sorted by (word, tag) in one blob with a side array of
 /// offsets, so lookup is a binary search with no allocation and no load-time
 /// decoding.
+#[derive(Clone)]
 pub struct Lexicon {
     phones: Vec<&'static str>,
     index: &'static [u8],
     data: &'static [u8],
     count: usize,
+    /// Pronunciations added at runtime, consulted before anything compiled in
+    /// so that a caller can override a word the dictionary gets wrong.
+    added: Vec<(char, String, Vec<&'static str>)>,
 }
+
+/// Why a runtime lexicon entry was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LexiconError {
+    /// A line with no `:` separating the word from its phones.
+    Malformed { line: usize },
+    /// A phone that is in neither the dictionary's phone table nor the
+    /// phoneset. Upstream warns and drops the phone, which turns a typo into a
+    /// mispronunciation discovered by ear; here it is refused outright.
+    UnknownPhone { line: usize, phone: String },
+}
+
+impl std::fmt::Display for LexiconError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LexiconError::Malformed { line } => {
+                write!(f, "line {line}: expected \"word [pos] : phones\"")
+            }
+            LexiconError::UnknownPhone { line, phone } => {
+                write!(f, "line {line}: {phone:?} is not a phone this voice has")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LexiconError {}
 
 impl Lexicon {
     pub fn parse(container: &Container<'static>) -> Result<Lexicon, DataError> {
@@ -82,7 +112,101 @@ impl Lexicon {
             index: &index[4..],
             data,
             count,
+            added: Vec::new(),
         })
+    }
+
+    /// The dictionary's own name for a phone, or the phoneset's.
+    ///
+    /// Returning a `&'static str` from a table that is already in the binary is
+    /// what keeps lookup allocation-free: a caller's `String` never has to
+    /// outlive the call. The dictionary spells its vowels with a stress digit
+    /// and the phoneset without, and both are accepted, so the output of
+    /// `Engine::phones` can be pasted straight back in.
+    fn known_phone(&self, phone: &str) -> Option<&'static str> {
+        self.phones
+            .iter()
+            .find(|p| **p == phone)
+            .copied()
+            .or_else(|| phoneset::name(phone))
+    }
+
+    /// Add one pronunciation, replacing any earlier one for the same word and
+    /// part of speech.
+    ///
+    /// `pos` selects between homographs by its first character; `None` matches
+    /// any part of speech.
+    pub fn add_entry(
+        &mut self,
+        word: &str,
+        pos: Option<&str>,
+        phones: &[&str],
+    ) -> Result<(), LexiconError> {
+        self.add_entry_at(word, pos, phones, 0)
+    }
+
+    fn add_entry_at(
+        &mut self,
+        word: &str,
+        pos: Option<&str>,
+        phones: &[&str],
+        line: usize,
+    ) -> Result<(), LexiconError> {
+        let tag = pos
+            .filter(|p| *p != "nil")
+            .and_then(|p| p.chars().next())
+            .unwrap_or('0');
+        let resolved = phones
+            .iter()
+            .map(|phone| {
+                self.known_phone(phone)
+                    .ok_or_else(|| LexiconError::UnknownPhone {
+                        line,
+                        phone: phone.to_string(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let word = word.to_lowercase();
+        self.added.retain(|(t, w, _)| *w != word || *t != tag);
+        self.added.push((tag, word, resolved));
+        Ok(())
+    }
+
+    /// Add entries written as `word [pos] : phone phone phone`, one per line.
+    ///
+    /// Blank lines and lines starting with `#` are ignored, as is anything
+    /// after a `#` within a line. This is upstream's `-add_lex` format, except
+    /// that a phone the voice does not have is an error rather than a warning:
+    /// a typo should not become a mispronunciation to be discovered by ear.
+    ///
+    /// Returns how many entries were added. Nothing is added if any line is
+    /// bad, so a rejected file leaves the dictionary as it was.
+    pub fn add_entries(&mut self, text: &str) -> Result<usize, LexiconError> {
+        let mut staged = self.clone();
+        let mut added = 0;
+
+        for (number, raw) in text.lines().enumerate() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (head, phones) = line
+                .split_once(':')
+                .ok_or(LexiconError::Malformed { line: number + 1 })?;
+
+            let mut fields = head.split_whitespace();
+            let word = fields
+                .next()
+                .ok_or(LexiconError::Malformed { line: number + 1 })?;
+            let word = word.trim_matches('"');
+            let phones: Vec<&str> = phones.split_whitespace().collect();
+            staged.add_entry_at(word, fields.next(), &phones, number + 1)?;
+            added += 1;
+        }
+
+        *self = staged;
+        Ok(added)
     }
 
     fn entry(&self, i: usize) -> (char, &'static str, &'static [u8]) {
@@ -101,6 +225,17 @@ impl Lexicon {
     /// homographs; entries tagged `'0'` match any part of speech.
     pub fn lookup(&self, word: &str, pos: Option<&str>) -> Option<Vec<&'static str>> {
         let tag = pos.and_then(|p| p.chars().next()).unwrap_or('0');
+
+        // Runtime entries first: adding a word is how a caller corrects one
+        // the dictionary already has.
+        let lowered = word.to_lowercase();
+        if let Some((_, _, phones)) = self
+            .added
+            .iter()
+            .find(|(t, w, _)| *w == lowered && (tag == '0' || *t == '0' || *t == tag))
+        {
+            return Some(phones.clone());
+        }
 
         if let Some((_, _, phones)) = ADDENDA
             .iter()
@@ -146,6 +281,7 @@ impl Lexicon {
 
 /// The letter-to-sound model: a decision tree per letter, predicting zero, one
 /// or two phones for each letter in its 4-letter context window.
+#[derive(Clone)]
 pub struct Lts {
     /// Start state for each of the 26 letters.
     letter_index: &'static [u8],

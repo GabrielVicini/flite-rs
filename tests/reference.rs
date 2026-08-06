@@ -183,6 +183,131 @@ fn output_is_identical_to_upstream_flite() {
     println!("{} sentences, all bit-identical", sentences.len());
 }
 
+/// The whole corpus as one file, read in chunks and synthesised as it goes.
+///
+/// The per-sentence test above never exercises a chunk boundary or a sentence
+/// break found across one, and those are exactly where a streaming reader goes
+/// wrong. Upstream reads the same file the same way, so this compares the two
+/// token streams as much as the audio.
+#[test]
+fn reading_a_file_in_chunks_matches_upstream() {
+    let Some(reference) = reference_binary() else {
+        println!("skipped: no reference binary");
+        return;
+    };
+
+    let work = std::env::temp_dir().join(format!("flite-rs-whole-file-{}", std::process::id()));
+    std::fs::create_dir_all(&work).expect("cannot create a working directory");
+    let input = work.join("corpus.txt");
+    let output = work.join("out.wav");
+    std::fs::write(&input, corpus().join("\n") + "\n").expect("cannot write the input file");
+
+    let status = Command::new(&reference)
+        .arg(&input)
+        .arg(&output)
+        .status()
+        .expect("cannot run the reference");
+    assert!(status.success(), "the reference failed on the whole corpus");
+    let theirs = wav_samples(&std::fs::read(&output).expect("reference wrote no output"));
+
+    let engine = flite_rs::Engine::new();
+    let mut ours = Vec::new();
+    engine
+        .synthesize_reader(
+            std::fs::File::open(&input).expect("the file was just written"),
+            |period| {
+                ours.extend_from_slice(period);
+                flite_rs::Flow::Continue
+            },
+        )
+        .expect("reading a local file cannot fail");
+
+    let _ = std::fs::remove_dir_all(&work);
+    assert_eq!(
+        difference(&ours, &theirs, false),
+        None,
+        "{} samples of continuous speech",
+        theirs.len()
+    );
+}
+
+/// The 16 kHz voice, which shares the language models and nothing else: its
+/// residual is raw mu-law rather than ADPCM, it has no decoded-size table, its
+/// LPC order is 16 rather than 10, and its postlexical rules leave `ah` alone.
+#[cfg(feature = "kal16")]
+#[test]
+fn the_16_khz_voice_matches_upstream() {
+    let Some(reference) = reference_binary() else {
+        println!("skipped: no reference binary");
+        return;
+    };
+
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("kal16"), "kal16 is not registered");
+    assert_eq!(engine.sample_rate(), 16000);
+
+    let sentences = corpus();
+    let failures = compare(&reference, &engine, &sentences, &["voice=kal16"], false);
+    assert!(
+        failures.is_empty(),
+        "{} of {} sentences diverged on kal16:\n  {}",
+        failures.len(),
+        sentences.len(),
+        failures.join("\n  ")
+    );
+    println!("{} sentences at 16 kHz, all bit-identical", sentences.len());
+}
+
+/// Synthesis from a phone string, which skips the lexicon and text analysis.
+#[test]
+fn phone_strings_match_upstream() {
+    let Some(reference) = reference_binary().map(|p| {
+        p.with_file_name(if cfg!(windows) {
+            "refphones.exe"
+        } else {
+            "refphones"
+        })
+    }) else {
+        println!("skipped: no reference binary");
+        return;
+    };
+    assert!(reference.is_file(), "rebuild the reference for refphones");
+
+    let work = std::env::temp_dir().join(format!("flite-rs-phones-{}", std::process::id()));
+    std::fs::create_dir_all(&work).expect("cannot create a working directory");
+    let output = work.join("out.wav");
+    let engine = flite_rs::Engine::new();
+
+    // A syllable break, `-`, is deliberately absent: it aborts upstream, so
+    // there is nothing to compare against. See `pipeline::analyse_phones`.
+    for phones in [
+        "pau hh ax l ow pau",
+        "pau w er l d pau",
+        "hh ax l ow",
+        "pau b uh k k iy p er pau",
+        "pau s ih n th ax s ax s pau",
+        "pau ay1 pau",
+        "pau k w eh1 s ch ax0 n pau",
+        "pau zh aa r jh oy oy pau",
+        // One segment, so no diphone spans it and there is no audio at all.
+        "pau",
+    ] {
+        let _ = std::fs::remove_file(&output);
+        let status = Command::new(&reference)
+            .arg(phones)
+            .arg(&output)
+            .status()
+            .expect("cannot run refphones");
+        assert!(status.success(), "the reference failed on {phones:?}");
+
+        let theirs = wav_samples(&std::fs::read(&output).expect("reference wrote no output"));
+        let ours = engine.synthesize_phones(phones).samples;
+        assert_eq!(difference(&ours, &theirs, false), None, "{phones:?}");
+    }
+
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// The join and resynthesis paths the bundled voice does not ask for.
 ///
 /// These are reachable only through [`flite_rs::VoiceParams`], so without this
@@ -208,12 +333,12 @@ fn alternative_join_and_resynth_paths_match_upstream() {
         (
             JoinType::Simple,
             ResynthType::Fixed,
-            ["simple_join", "fixed"],
+            ["join_type=simple_join", "resynth_type=fixed"],
         ),
         (
             JoinType::ModifiedLpc,
             ResynthType::Float,
-            ["modified_lpc", "float"],
+            ["join_type=modified_lpc", "resynth_type=float"],
         ),
     ] {
         let mut engine = flite_rs::Engine::new();

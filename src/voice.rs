@@ -20,7 +20,7 @@
 //! material supplies timbre, the prosody model supplies everything else.
 
 use crate::data::{u16_at, u32_at, Container, DataError, Reader};
-use crate::dsp;
+use crate::dsp::{self, Flow};
 use crate::utterance::{ItemId, Utterance};
 
 /// One entry of the diphone index: where a diphone's pitch periods live.
@@ -34,6 +34,17 @@ struct Diphone {
     second_half: u8,
 }
 
+/// How a voice stores the excitation residual of a pitch period.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Codec {
+    /// One byte per sample, so the stored length is the decoded length. A voice
+    /// that names no codec upstream means this, and ships no size table.
+    Ulaw,
+    /// G.721 ADPCM at four bits per sample, which is why the 8 kHz voice is a
+    /// third the size of the 16 kHz one despite holding the same recordings.
+    G721,
+}
+
 /// A diphone database plus its pitch-period store.
 pub struct Voice {
     index: Vec<Diphone>,
@@ -41,13 +52,21 @@ pub struct Voice {
     lpc: &'static [u8],
     /// Byte offset of each period's residual within `residual`.
     residual_offsets: &'static [u8],
-    /// Decoded length in samples of each period's residual.
-    residual_sizes: &'static [u8],
+    /// Decoded length in samples of each period's residual. Absent when the
+    /// residual is not compressed and the offsets already give it.
+    residual_sizes: Option<&'static [u8]>,
     residual: &'static [u8],
+    codec: Codec,
     pub order: usize,
     pub sample_rate: u32,
     coeff_min: f32,
     coeff_range: f32,
+    /// The rate and pitch this voice registers itself with, which differ per
+    /// voice and so travel in the voice file rather than in the code.
+    duration_stretch: f32,
+    f0_mean: f32,
+    f0_stddev: f32,
+    fold_ah_to_aa: bool,
 }
 
 impl Voice {
@@ -59,13 +78,22 @@ impl Voice {
         let sample_rate = header.u32()?;
         let coeff_min = header.f32()?;
         let coeff_range = header.f32()?;
+        let codec = match header.u32()? {
+            0 => Codec::Ulaw,
+            1 => Codec::G721,
+            _ => return Err(DataError("unknown residual codec")),
+        };
+        let duration_stretch = header.f32()?;
+        let f0_mean = header.f32()?;
+        let f0_stddev = header.f32()?;
+        let fold_ah_to_aa = header.u32()? != 0;
 
         let lpc = container.section("sts.lpc")?;
         let residual_offsets = container.section("sts.resoffs")?;
-        let residual_sizes = container.section("sts.ressize")?;
+        let residual_sizes = container.optional_section("sts.ressize");
         let residual = container.section("sts.res")?;
         if lpc.len() < frames * order * 2
-            || residual_sizes.len() < frames
+            || residual_sizes.is_some_and(|sizes| sizes.len() < frames)
             || residual_offsets.len() < (frames + 1) * 4
         {
             return Err(DataError("voice tables inconsistent with header"));
@@ -91,11 +119,33 @@ impl Voice {
             residual_offsets,
             residual_sizes,
             residual,
+            codec,
             order,
             sample_rate,
             coeff_min,
             coeff_range,
+            duration_stretch,
+            f0_mean,
+            f0_stddev,
+            fold_ah_to_aa,
         })
+    }
+
+    /// The parameters this voice registers itself with.
+    ///
+    /// The join and resynthesis choices are not in the voice file because both
+    /// bundled voices ask for the same pair; a voice that wanted otherwise
+    /// would need the file to carry them.
+    pub fn params(&self) -> VoiceParams {
+        VoiceParams {
+            int_f0_target_mean: self.f0_mean,
+            int_f0_target_stddev: self.f0_stddev,
+            duration_stretch: self.duration_stretch,
+            f0_shift: 1.0,
+            join_type: JoinType::ModifiedLpc,
+            resynth_type: ResynthType::Fixed,
+            fold_ah_to_aa: self.fold_ah_to_aa,
+        }
     }
 
     fn find(&self, name: &str) -> Option<&Diphone> {
@@ -105,7 +155,17 @@ impl Voice {
 
     /// Decoded length in samples of one pitch period.
     fn period_samples(&self, period: usize) -> usize {
-        self.residual_sizes[period] as usize
+        match self.residual_sizes {
+            Some(sizes) => sizes[period] as usize,
+            // An uncompressed residual is one byte per sample, so the gap
+            // between two offsets is already the answer. This is why the
+            // offset table carries one entry more than there are periods.
+            None => {
+                let start = u32_at(self.residual_offsets, period);
+                let end = u32_at(self.residual_offsets, period + 1);
+                end.saturating_sub(start) as usize
+            }
+        }
     }
 
     /// The packed ADPCM residual for one pitch period.
@@ -180,6 +240,14 @@ pub struct VoiceParams {
     pub f0_shift: f32,
     pub join_type: JoinType,
     pub resynth_type: ResynthType,
+    /// Whether this voice's postlexical rules rewrite `ah` as `aa`.
+    ///
+    /// Upstream gives each voice a whole postlex function and this is the only
+    /// rule the two bundled ones differ by. It belongs to the voice, not the
+    /// language: the 8 kHz database records the vowel only as `aa`, while the
+    /// 16 kHz one has both. Applying it to a voice that did not ask for it
+    /// changes the phone, and with it the duration the model predicts.
+    pub fold_ah_to_aa: bool,
 }
 
 impl Default for VoiceParams {
@@ -193,6 +261,7 @@ impl Default for VoiceParams {
             f0_shift: 1.0,
             join_type: JoinType::ModifiedLpc,
             resynth_type: ResynthType::Float,
+            fold_ah_to_aa: false,
         }
     }
 }
@@ -212,12 +281,30 @@ impl Audio {
 
 /// Generate the waveform for a fully analysed utterance.
 pub fn synthesise(voice: &Voice, utt: &Utterance, params: &VoiceParams) -> Audio {
-    let silence = Audio {
-        samples: Vec::new(),
+    let mut samples = Vec::new();
+    synthesise_streaming(voice, utt, params, &mut |period| {
+        samples.extend_from_slice(period);
+        Flow::Continue
+    });
+    Audio {
+        samples,
         sample_rate: voice.sample_rate,
-    };
+    }
+}
+
+/// The same synthesis, handing each pitch period to `sink` as it is produced.
+///
+/// Nothing larger than one utterance is ever held, so a caller that plays or
+/// writes the audio as it arrives uses memory that does not grow with the
+/// length of the speech.
+pub fn synthesise_streaming(
+    voice: &Voice,
+    utt: &Utterance,
+    params: &VoiceParams,
+    sink: &mut dyn FnMut(&[i16]) -> Flow,
+) {
     if params.join_type == JoinType::None {
-        return silence;
+        return;
     }
 
     let mut units = select_units(voice, utt);
@@ -226,25 +313,27 @@ pub fn synthesise(voice: &Voice, utt: &Utterance, params: &VoiceParams) -> Audio
         _ => pitch_marks(voice, utt),
     };
     if units.is_empty() || pitch_marks.len() < 2 {
-        return silence;
+        return;
+    }
+
+    if debugging_units() {
+        dump_units(&units, &pitch_marks);
     }
 
     let (coefficients, sizes, residual) = build_excitation(voice, &units, &pitch_marks);
     let resynthesise = match params.resynth_type {
-        ResynthType::Fixed => dsp::lpc_resynthesise,
-        ResynthType::Float => dsp::lpc_resynthesise_float,
+        ResynthType::Fixed => dsp::lpc_resynthesise_streaming,
+        ResynthType::Float => dsp::lpc_resynthesise_float_streaming,
     };
-    Audio {
-        samples: resynthesise(
-            &coefficients,
-            &sizes,
-            &residual,
-            voice.coeff_min,
-            voice.coeff_range,
-            voice.order,
-        ),
-        sample_rate: voice.sample_rate,
-    }
+    resynthesise(
+        &coefficients,
+        &sizes,
+        &residual,
+        voice.coeff_min,
+        voice.coeff_range,
+        voice.order,
+        sink,
+    );
 }
 
 /// Choose a diphone for each adjacent pair of segments, and split it into the
@@ -327,7 +416,12 @@ fn pitch_marks(voice: &Voice, utt: &Utterance) -> Vec<usize> {
         let position = utt.feature_f32(target, "pos") as f64;
         let f0 = utt.feature_f32(target, "f0") as f64;
         if time != position && position > last_position {
-            let slope = (f0 - last_f0) / (position - last_position);
+            // Rounded to f32 deliberately: the model computes this slope in
+            // single precision and everything else in double, and keeping the
+            // extra bits moves a pitch mark by one sample often enough to
+            // matter. It first shows at 16 kHz, where the marks are twice as
+            // fine, but the arithmetic is wrong at any rate.
+            let slope = (((f0 - last_f0) / (position - last_position)) as f32) as f64;
             while time < position {
                 let instantaneous = last_f0 + (time - last_position) * slope;
                 if instantaneous <= 0.0 {
@@ -341,6 +435,38 @@ fn pitch_marks(voice: &Voice, utt: &Utterance) -> Vec<usize> {
         last_position = position;
     }
     marks
+}
+
+/// Whether `FLITE_DEBUG_UNITS` is set, read once.
+///
+/// The environment is consulted at most one time per process, because this sits
+/// in front of every utterance.
+fn debugging_units() -> bool {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ASKED.get_or_init(|| std::env::var_os("FLITE_DEBUG_UNITS").is_some())
+}
+
+/// Print the selected units and output pitch marks, in the format
+/// `tools/reference/refdump -u` prints them.
+///
+/// When the phones, the durations and the pitch targets all agree with
+/// upstream and the audio still does not, the difference is in one of these
+/// two, and nothing else shows it.
+fn dump_units(units: &[Unit], pitch_marks: &[usize]) {
+    eprintln!("UNITS");
+    for unit in units {
+        eprintln!(
+            "{} {} {}",
+            unit.first_period, unit.last_period, unit.target_end
+        );
+    }
+    eprintln!("PITCHMARKS {}", pitch_marks.len());
+    for (i, mark) in pitch_marks.iter().enumerate() {
+        eprintln!(
+            "{mark} {}",
+            mark - if i > 0 { pitch_marks[i - 1] } else { 0 }
+        );
+    }
 }
 
 /// Pitch marks that keep the recorded timing: one per source period, spaced by
@@ -434,8 +560,15 @@ fn copy_residual(
     target: &mut [u8],
     target_size: usize,
 ) {
-    dsp::decode_adpcm(voice.period_residual(period), decoded);
-    let source = &decoded[dsp::ADPCM_LEAD_IN.min(decoded.len())..];
+    let source = match voice.codec {
+        Codec::G721 => {
+            dsp::decode_adpcm(voice.period_residual(period), decoded);
+            &decoded[dsp::ADPCM_LEAD_IN.min(decoded.len())..]
+        }
+        // Already samples: no decoding, and no lead-in to discard, because
+        // there is no adaptive state to converge.
+        Codec::Ulaw => voice.period_residual(period),
+    };
     let source_size = voice.period_samples(period).min(source.len());
     let target_size = target_size.min(target.len());
 

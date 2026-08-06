@@ -1,6 +1,6 @@
 [package]
 name = "flite-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.70"
 license = "Apache-2.0"
@@ -24,6 +24,10 @@ required-features = ["cli"]
 default = ["cli"]
 # The CLI front-end; without it the library builds with zero dependencies.
 cli = ["dep:clap"]
+# The cmu_us_kal16 voice: the same speaker at 16 kHz, and a clear improvement
+# in quality. Off by default because its residual is not compressed, so it adds
+# about 4 MB to the binary.
+kal16 = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }

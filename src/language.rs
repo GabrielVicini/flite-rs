@@ -6,6 +6,7 @@ use crate::data::{u16_at, Container, DataError};
 use crate::lexicon::{Lexicon, Lts};
 
 /// US English models and dictionaries, parsed from the embedded data file.
+#[derive(Clone)]
 pub struct Language {
     pub lexicon: Lexicon,
     pub lts: Lts,
@@ -47,6 +48,7 @@ impl Language {
 /// by checking that the string starts and ends with letter sequences that occur
 /// in English words, over an alphabet where nasals collapse to `N` and vowels
 /// to `V`.
+#[derive(Clone)]
 pub struct Sayable {
     prefix: &'static [u8],
     suffix: &'static [u8],

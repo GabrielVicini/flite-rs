@@ -15,7 +15,7 @@ at 16 kHz, and US English text handling.
 
 ```toml
 [dependencies]
-flite-rs = "0.1.1"
+flite-rs = "0.2.0"
 ```
 
 The library has no dependencies with `default-features = false`. The default
@@ -77,7 +77,7 @@ The 8 kHz `kal` voice is built in. The `kal16` feature adds the same speaker at
 recordings are not compressed:
 
 ```toml
-flite-rs = { version = "0.1.1", features = ["kal16"] }
+flite-rs = { version = "0.2.0", features = ["kal16"] }
 ```
 
 ```rust

@@ -59,11 +59,17 @@ impl<'a> Container<'a> {
     }
 
     pub fn section(&self, name: &str) -> Result<&'a [u8]> {
+        self.optional_section(name)
+            .ok_or(DataError("missing section"))
+    }
+
+    /// A section that a file may legitimately not carry, such as the decoded
+    /// residual lengths of a voice whose residual is not compressed.
+    pub fn optional_section(&self, name: &str) -> Option<&'a [u8]> {
         self.sections
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, b)| *b)
-            .ok_or(DataError("missing section"))
     }
 }
 

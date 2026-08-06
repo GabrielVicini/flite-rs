@@ -11,15 +11,37 @@
 use flite_rs::Engine;
 
 fn main() {
-    let text: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // `-p` analyses the argument as phones instead, which skips the lexicon
+    // and the intonation model. `voice=NAME` picks a voice, since the
+    // postlexical rules and the pitch range belong to it.
+    let phones = arguments.first().is_some_and(|a| a == "-p");
+    if phones {
+        arguments.remove(0);
+    }
+    let voice = arguments
+        .first()
+        .and_then(|a| a.strip_prefix("voice=").map(str::to_string));
+    if voice.is_some() {
+        arguments.remove(0);
+    }
+
+    let text = arguments.join(" ");
     let text = if text.is_empty() {
         "Hello, and welcome to the world of speech synthesis.".to_string()
     } else {
         text
     };
 
-    let engine = Engine::new();
-    let utt = engine.analyse(&text);
+    let mut engine = Engine::new();
+    if let Some(name) = &voice {
+        assert!(engine.select_voice(name), "no voice named {name}");
+    }
+    let utt = if phones {
+        engine.analyse_phones(&text)
+    } else {
+        engine.analyse(&text)
+    };
 
     println!("SEGMENTS");
     for seg in utt.iter_relation("Segment") {

@@ -69,35 +69,52 @@ pub mod value;
 pub mod voice;
 pub mod wav;
 
+pub use dsp::Flow;
+pub use lexicon::LexiconError;
 pub use utterance::Utterance;
 pub use voice::{Audio, JoinType, ResynthType, Voice, VoiceParams};
-pub use wav::write_wav;
+pub use wav::{write_wav, WavWriter};
 
 use language::Language;
+use std::sync::Arc;
 
 /// US English models: lexicon, letter-to-sound rules, and the CART models for
 /// phrasing, part of speech, intonation and duration.
 pub(crate) static EN_US_DATA: &[u8] = include_bytes!("../data/en_us.dat");
 
 /// The `cmu_us_kal` diphone voice: 8 kHz, male, American English.
-static KAL_VOICE_DATA: &[u8] = include_bytes!("../data/cmu_us_kal.dat");
+///
+/// Public so that a caller can register a second voice from the same
+/// recordings with different settings, which is the cheapest way to get a
+/// second voice: the data is already in the binary.
+pub static KAL_VOICE_DATA: &[u8] = include_bytes!("../data/cmu_us_kal.dat");
 
-/// Duration multiplier baked into the bundled voice, tuned to its recordings.
-/// User-supplied stretch multiplies this rather than replacing it, so
-/// `set_duration_stretch(1.0)` means "the voice's natural rate".
-const VOICE_DURATION_STRETCH: f32 = 1.1;
-/// Default pitch mean and spread in Hz for the bundled voice.
-const DEFAULT_F0_MEAN: f32 = 95.0;
-const DEFAULT_F0_STDDEV: f32 = 11.0;
+/// The same speaker at 16 kHz, which is the largest quality difference on
+/// offer. Its residual is not compressed, so it is nearly three times the size
+/// of the 8 kHz voice; that is why it is behind a feature.
+#[cfg(feature = "kal16")]
+pub static KAL16_VOICE_DATA: &[u8] = include_bytes!("../data/cmu_us_kal16.dat");
+
+/// One registered voice: its data, the language it speaks, and its settings.
+struct Registered {
+    name: String,
+    voice: Voice,
+    /// Shared, because several voices of the same language use one set of
+    /// models and those are the large part.
+    language: Arc<Language>,
+    params: VoiceParams,
+    /// The stretch this voice was registered with, which
+    /// [`Engine::set_duration_stretch`] treats as its natural rate.
+    natural_duration_stretch: f32,
+}
 
 /// A ready-to-use synthesiser.
 ///
-/// Holds the parsed language models and voice. Cheap to use, not cheap to
+/// Holds the parsed language models and voices. Cheap to use, not cheap to
 /// construct, so create one and share it.
 pub struct Engine {
-    language: Language,
-    voice: Voice,
-    params: VoiceParams,
+    voices: Vec<Registered>,
+    selected: usize,
 }
 
 impl Engine {
@@ -114,18 +131,112 @@ impl Engine {
 
     /// Build an engine, reporting malformed embedded data instead of panicking.
     pub fn try_new() -> Result<Engine, data::DataError> {
-        Ok(Engine {
-            language: Language::parse(EN_US_DATA)?,
-            voice: Voice::parse(KAL_VOICE_DATA)?,
-            params: VoiceParams {
-                int_f0_target_mean: DEFAULT_F0_MEAN,
-                int_f0_target_stddev: DEFAULT_F0_STDDEV,
-                duration_stretch: VOICE_DURATION_STRETCH,
-                f0_shift: 1.0,
-                join_type: JoinType::ModifiedLpc,
-                resynth_type: ResynthType::Fixed,
-            },
-        })
+        let mut engine = Engine {
+            voices: Vec::new(),
+            selected: 0,
+        };
+        let language = Arc::new(Language::parse(EN_US_DATA)?);
+
+        // The higher-rate voice is registered first so that the 8 kHz one is
+        // the selected default whether or not the feature is on: a build flag
+        // should add a choice, not silently change what everyone hears.
+        #[cfg(feature = "kal16")]
+        {
+            let voice = Voice::parse(KAL16_VOICE_DATA)?;
+            let params = voice.params();
+            engine.register_voice("kal16", voice, Arc::clone(&language), params);
+        }
+        // Upstream registers this voice under its speaker's name.
+        let voice = Voice::parse(KAL_VOICE_DATA)?;
+        let params = voice.params();
+        engine.register_voice("kal", voice, language, params);
+        Ok(engine)
+    }
+
+    /// Add a voice and select it.
+    ///
+    /// Pass an existing [`Engine::language`] to share one set of models between
+    /// voices rather than parsing them again. A name already in use is
+    /// replaced.
+    pub fn register_voice(
+        &mut self,
+        name: &str,
+        voice: Voice,
+        language: Arc<Language>,
+        params: VoiceParams,
+    ) {
+        let registered = Registered {
+            name: name.to_string(),
+            voice,
+            language,
+            params,
+            natural_duration_stretch: params.duration_stretch,
+        };
+        match self.voices.iter().position(|v| v.name == name) {
+            Some(existing) => {
+                self.voices[existing] = registered;
+                self.selected = existing;
+            }
+            None => {
+                self.voices.push(registered);
+                self.selected = self.voices.len() - 1;
+            }
+        }
+    }
+
+    /// The names of every registered voice, in registration order.
+    pub fn voice_names(&self) -> impl Iterator<Item = &str> {
+        self.voices.iter().map(|v| v.name.as_str())
+    }
+
+    /// The voice currently being spoken with.
+    pub fn voice_name(&self) -> &str {
+        &self.current().name
+    }
+
+    /// Speak with a different registered voice, reporting whether there is one
+    /// by that name. A failed selection leaves the current voice in place.
+    pub fn select_voice(&mut self, name: &str) -> bool {
+        match self.voices.iter().position(|v| v.name == name) {
+            Some(found) => {
+                self.selected = found;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The models the current voice speaks with, for registering a second
+    /// voice of the same language without parsing them twice.
+    pub fn language(&self) -> Arc<Language> {
+        Arc::clone(&self.current().language)
+    }
+
+    /// Teach the current voice some pronunciations, written as
+    /// `word [pos] : phone phone phone`, one per line.
+    ///
+    /// ```no_run
+    /// # let mut engine = flite_rs::Engine::new();
+    /// engine.add_lex_entries("kubernetes : k uw b er n eh1 t iy z")?;
+    /// # Ok::<(), flite_rs::LexiconError>(())
+    /// ```
+    ///
+    /// Added words are looked up before the compiled dictionary, so this also
+    /// corrects a word that is already in it. A phone the voice does not have
+    /// is refused here rather than mispronounced later, and a file with one bad
+    /// line adds nothing.
+    ///
+    /// Voices sharing one set of models keep sharing it until this is called;
+    /// the models are copied at that point, so the addition applies to the
+    /// voice that is selected and not to its siblings.
+    pub fn add_lex_entries(&mut self, entries: &str) -> Result<usize, LexiconError> {
+        let selected = self.selected;
+        let language = Arc::make_mut(&mut self.voices[selected].language);
+        language.lexicon.add_entries(entries)
+    }
+
+    fn current(&self) -> &Registered {
+        &self.voices[self.selected]
     }
 
     /// Speech rate, where 1.0 is the voice's natural rate. Values above 1.0
@@ -135,29 +246,33 @@ impl Engine {
     /// 1.0 here is not 1.0 in [`VoiceParams::duration_stretch`]. Set that field
     /// directly through [`Engine::params_mut`] to work in upstream's units.
     pub fn set_duration_stretch(&mut self, stretch: f32) {
-        self.params.duration_stretch = stretch.max(0.05) * VOICE_DURATION_STRETCH;
+        let natural = self.current().natural_duration_stretch;
+        self.params_mut().duration_stretch = stretch.max(0.05) * natural;
     }
 
     /// Pitch multiplier applied to the target mean; 1.0 leaves it unchanged.
     pub fn set_f0_shift(&mut self, shift: f32) {
-        self.params.f0_shift = shift.max(0.1);
+        self.params_mut().f0_shift = shift.max(0.1);
     }
 
-    /// The voice parameters in full, for settings the two helpers above do not
-    /// cover.
+    /// The current voice's parameters in full, for settings the two helpers
+    /// above do not cover.
     pub fn params(&self) -> &VoiceParams {
-        &self.params
+        &self.current().params
     }
 
-    /// The voice parameters, mutably. Values are used as given: unlike
-    /// [`Engine::set_duration_stretch`] nothing is clamped or rescaled.
+    /// The current voice's parameters, mutably. Values are used as given:
+    /// unlike [`Engine::set_duration_stretch`] nothing is clamped or rescaled.
     pub fn params_mut(&mut self) -> &mut VoiceParams {
-        &mut self.params
+        let selected = self.selected;
+        &mut self.voices[selected].params
     }
 
     /// The sample rate of everything this engine produces.
+    ///
+    /// Voices may differ in this, so read it again after selecting one.
     pub fn sample_rate(&self) -> u32 {
-        self.voice.sample_rate
+        self.current().voice.sample_rate
     }
 
     /// Synthesise text to audio.
@@ -167,14 +282,116 @@ impl Engine {
     /// yields empty audio rather than an error.
     pub fn synthesize(&self, text: &str) -> Audio {
         let mut samples = Vec::new();
-        for sentence in text::tokenize(text) {
-            let utt = pipeline::analyse(&self.language, &sentence, &self.params);
-            samples.extend(voice::synthesise(&self.voice, &utt, &self.params).samples);
-        }
+        self.synthesize_streaming(text, |period| {
+            samples.extend_from_slice(period);
+            Flow::Continue
+        });
         Audio {
             samples,
-            sample_rate: self.voice.sample_rate,
+            sample_rate: self.sample_rate(),
         }
+    }
+
+    /// Synthesise text, handing each pitch period to `sink` as it is produced.
+    ///
+    /// Sentences are analysed one at a time and nothing is accumulated, so a
+    /// caller that plays or writes the audio as it arrives holds no more for an
+    /// hour of speech than for a second of it. Returning [`Flow::Stop`] ends
+    /// synthesis where it stands.
+    pub fn synthesize_streaming<F>(&self, text: &str, mut sink: F)
+    where
+        F: FnMut(&[i16]) -> Flow,
+    {
+        let current = self.current();
+        let mut stopped = false;
+        for sentence in text::sentences(text) {
+            if stopped {
+                return;
+            }
+            let utt = pipeline::analyse(&current.language, &sentence, &current.params);
+            voice::synthesise_streaming(&current.voice, &utt, &current.params, &mut |period| {
+                let flow = sink(period);
+                stopped = flow == Flow::Stop;
+                flow
+            });
+        }
+    }
+
+    /// Synthesise everything a reader produces, without holding it all.
+    ///
+    /// Text is consumed in fixed-size chunks and grouped into sentences as the
+    /// tokens arrive, so neither the input nor the output is ever fully in
+    /// memory. This is what to use for a file of any size.
+    pub fn synthesize_reader<R, F>(&self, reader: R, mut sink: F) -> std::io::Result<()>
+    where
+        R: std::io::Read,
+        F: FnMut(&[i16]) -> Flow,
+    {
+        let current = self.current();
+        let mut speak = |sentence: &[text::Token]| {
+            let utt = pipeline::analyse(&current.language, sentence, &current.params);
+            let mut flow = Flow::Continue;
+            voice::synthesise_streaming(&current.voice, &utt, &current.params, &mut |period| {
+                flow = sink(period);
+                flow
+            });
+            flow
+        };
+
+        let mut sentences = text::SentenceBuilder::default();
+        let mut tokens = text::ChunkedTokens::new(reader);
+        while let Some(token) = tokens.next_token()? {
+            if let Some(sentence) = sentences.push(token) {
+                if speak(&sentence) == Flow::Stop {
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(sentence) = sentences.finish() {
+            speak(&sentence);
+        }
+        Ok(())
+    }
+
+    /// Synthesise a phone string directly, as in `"pau hh ax l ow pau"`.
+    ///
+    /// Nothing is looked up and no intonation is predicted: the phones are
+    /// spoken in order, timed by the duration model, on a straight pitch line.
+    /// A `-` between phones is a syllable boundary and a trailing `0` or `1`
+    /// marks that syllable's stress, both of which the duration model reads.
+    ///
+    /// Use it to say something the lexicon gets wrong, or to hear exactly what
+    /// [`Engine::phones`] printed.
+    pub fn synthesize_phones(&self, phones: &str) -> Audio {
+        let mut samples = Vec::new();
+        self.synthesize_phones_streaming(phones, |period| {
+            samples.extend_from_slice(period);
+            Flow::Continue
+        });
+        Audio {
+            samples,
+            sample_rate: self.sample_rate(),
+        }
+    }
+
+    /// [`Engine::synthesize_phones`], a pitch period at a time.
+    pub fn synthesize_phones_streaming<F>(&self, phones: &str, mut sink: F)
+    where
+        F: FnMut(&[i16]) -> Flow,
+    {
+        // A phone string is one utterance however many sentences it looks
+        // like, so the tokens are not split.
+        let tokens: Vec<text::Token> = text::tokenize(phones).into_iter().flatten().collect();
+        let current = self.current();
+        let utt = pipeline::analyse_phones(&current.language, &tokens, &current.params);
+        voice::synthesise_streaming(&current.voice, &utt, &current.params, &mut sink);
+    }
+
+    /// Run the phone-string pipeline and return the utterance, for inspection.
+    pub fn analyse_phones(&self, phones: &str) -> Utterance {
+        let tokens: Vec<text::Token> = text::tokenize(phones).into_iter().flatten().collect();
+        let current = self.current();
+        pipeline::analyse_phones(&current.language, &tokens, &current.params)
     }
 
     /// The phone sequence that would be spoken, space separated.
@@ -185,7 +402,8 @@ impl Engine {
         text::tokenize(text)
             .iter()
             .map(|sentence| {
-                let utt = pipeline::analyse(&self.language, sentence, &self.params);
+                let current = self.current();
+                let utt = pipeline::analyse(&current.language, sentence, &current.params);
                 pipeline::phone_string(&utt)
             })
             .collect::<Vec<_>>()
@@ -199,7 +417,8 @@ impl Engine {
     /// [`text::tokenize`] first if that is not what you want.
     pub fn analyse(&self, text: &str) -> Utterance {
         let tokens: Vec<text::Token> = text::tokenize(text).into_iter().flatten().collect();
-        pipeline::analyse(&self.language, &tokens, &self.params)
+        let current = self.current();
+        pipeline::analyse(&current.language, &tokens, &current.params)
     }
 }
 

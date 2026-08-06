@@ -3,11 +3,12 @@
 
 This script is a *build-time* tool, not part of the shipped library.  It reads
 the upstream Flite distribution's generated C arrays (lexicon, letter-to-sound
-model, CART trees, and the cmu_us_kal diphone voice) and repacks them into the
-two container files that flite-rs embeds:
+model, CART trees, and the diphone voices) and repacks them into the
+container files that flite-rs embeds:
 
-    data/en_us.dat        language data (lexicon, LTS, CARTs, aswd FSMs)
-    data/cmu_us_kal.dat   voice data (diphone index, LPC frames, residuals)
+    data/en_us.dat          language data (lexicon, LTS, CARTs, aswd FSMs)
+    data/cmu_us_kal.dat     voice data (diphone index, LPC frames, residuals)
+    data/cmu_us_kal16.dat   the same speaker at 16 kHz
 
 Only *data* crosses over; none of Flite's code is translated here.  See
 THIRD-PARTY-LICENSES.md for the terms those data files carry.
@@ -26,6 +27,9 @@ import struct
 import sys
 
 MAGIC = b"FLRSDAT\x01"
+
+# The diphone voices converted. Both speak US English, so they share en_us.dat.
+VOICES = ["cmu_us_kal", "cmu_us_kal16"]
 
 
 class Container:
@@ -358,21 +362,66 @@ def convert_aswd(src: str, out: Container) -> None:
         )
 
 
-def convert_voice(src: str, out: Container) -> None:
-    voxdir = os.path.join(src, "lang", "cmu_us_kal")
-    dip = read(os.path.join(voxdir, "cmu_us_kal_diphone.c"))
+# Residual encodings, matching the `codec` field of Flite's cst_sts_list. A
+# voice that names no codec stores its residual as plain mu-law.
+CODEC_ULAW = 0
+CODEC_G721 = 1
 
-    sts = re.search(r"cst_sts_list\s+cmu_us_kal_sts\s*=\s*\{(.*?)\};", dip, re.S).group(1)
-    nums = re.findall(r"-?\d+\.\d+|\b\d+\b", strip_comments(sts).replace("#ifdef", " "))
+
+def voice_settings(voxdir: str, voice: str) -> tuple[float, float, float, int]:
+    """What the voice registers itself with, as opposed to what its tables hold.
+
+    The pitch and rate constants and the choice of postlexical rules live in the
+    registration function rather than in any data table, so they are read out of
+    the C source and carried in the voice file. Keeping them there is what lets
+    a second voice differ without touching any Rust.
+
+    `fix_ah` is the one place the two voices' postlexical rules diverge: the
+    8 kHz database records that vowel only as `aa`, so the voice rewrites it,
+    while the 16 kHz one has both and leaves it alone. Treating that as a
+    property of the language rather than of the voice mispronounces and
+    mistimes every `ah` in the other voice.
+    """
+    text = read(os.path.join(voxdir, f"{voice}.c"))
+    found = dict(
+        re.findall(r'feat_set_float\s*\(\s*v->features\s*,\s*"(\w+)"\s*,\s*([-\d.]+)', text)
+    )
+    return (
+        float(found["duration_stretch"]),
+        float(found["int_f0_target_mean"]),
+        float(found["int_f0_target_stddev"]),
+        1 if re.search(r"fix_ah\s*\(\s*u\s*\)", text) else 0,
+    )
+
+
+def convert_voice(src: str, out: Container, voice: str) -> None:
+    voxdir = os.path.join(src, "lang", voice)
+    dip = read(os.path.join(voxdir, f"{voice}_diphone.c"))
+
+    sts = re.search(rf"cst_sts_list\s+{voice}_sts\s*=\s*\{{(.*?)\}};", dip, re.S).group(1)
+    sts = strip_comments(sts).replace("#ifdef", " ")
+    # A trailing string literal names the residual codec; its absence means
+    # the residual is raw mu-law and there is no ressize table either.
+    codec_name = re.search(r'"([^"]*)"\s*$', sts.strip())
+    codec = CODEC_G721 if codec_name and codec_name.group(1) == "g721" else CODEC_ULAW
+    if codec_name and codec_name.group(1) not in ("g721",):
+        sys.exit(f"unsupported residual codec {codec_name.group(1)!r} in {voice}")
+
+    nums = re.findall(r"-?\d+\.\d+|\b\d+\b", sts)
     num_frames, num_channels, sample_rate = int(nums[-5]), int(nums[-4]), int(nums[-3])
     coeff_min, coeff_range = float(nums[-2]), float(nums[-1])
-    print(f"  voice: {num_frames} frames x {num_channels} ch @ {sample_rate} Hz")
+    stretch, f0_mean, f0_stddev, fix_ah = voice_settings(voxdir, voice)
+    print(
+        f"  {voice}: {num_frames} frames x {num_channels} ch @ {sample_rate} Hz, "
+        f"{'g721' if codec else 'ulaw'} residual"
+        f"{', folds ah to aa' if fix_ah else ''}"
+    )
 
     entries = []
-    body = strip_comments(array_body(dip, "cmu_us_kal_index"))
+    body = strip_comments(array_body(dip, f"{voice}_index"))
     for m in re.finditer(r'\{\s*"([^"]*)"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}', body):
         entries.append((m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))))
-    print(f"  voice: {len(entries)} diphones")
+    print(f"  {voice}: {len(entries)} diphones")
 
     index = bytearray(struct.pack("<I", len(entries)))
     for name, start, pb, end in entries:
@@ -384,23 +433,37 @@ def convert_voice(src: str, out: Container) -> None:
     # Each generated array carries one trailing sentinel element; the residual
     # offset table is the exception, holding num_frames + 1 real offsets so the
     # last frame's extent is known.
-    lpc = int_array(read(os.path.join(voxdir, "cmu_us_kal_lpc.c")), "cmu_us_kal_lpc")
+    lpc = int_array(read(os.path.join(voxdir, f"{voice}_lpc.c")), f"{voice}_lpc")
     lpc = lpc[: num_frames * num_channels]
-    resi = int_array(read(os.path.join(voxdir, "cmu_us_kal_residx.c")), "cmu_us_kal_resi")
+    resi = int_array(read(os.path.join(voxdir, f"{voice}_residx.c")), f"{voice}_resi")
     resi = resi[: num_frames + 1]
-    ressize = int_array(read(os.path.join(voxdir, "cmu_us_kal_ressize.c")), "cmu_us_kal_ressize")
-    ressize = ressize[:num_frames]
-    res = int_array(read(os.path.join(voxdir, "cmu_us_kal_res.c")), "cmu_us_kal_res")
+    res = int_array(read(os.path.join(voxdir, f"{voice}_res.c")), f"{voice}_res")
     res = res[: resi[-1]]
     assert len(lpc) == num_frames * num_channels and len(res) == resi[-1]
 
     out.add(
         "sts.header",
-        struct.pack("<IIIff", num_frames, num_channels, sample_rate, coeff_min, coeff_range),
+        struct.pack(
+            "<IIIffIfffI",
+            num_frames,
+            num_channels,
+            sample_rate,
+            coeff_min,
+            coeff_range,
+            codec,
+            stretch,
+            f0_mean,
+            f0_stddev,
+            fix_ah,
+        ),
     )
     out.add("sts.lpc", struct.pack(f"<{len(lpc)}H", *lpc))
     out.add("sts.resoffs", struct.pack(f"<{len(resi)}I", *resi))
-    out.add("sts.ressize", bytes(ressize))
+    # Only a compressed residual needs a decoded-length table: for raw mu-law
+    # the offsets already give it, and the voice ships none.
+    if codec != CODEC_ULAW:
+        ressize = int_array(read(os.path.join(voxdir, f"{voice}_ressize.c")), f"{voice}_ressize")
+        out.add("sts.ressize", bytes(ressize[:num_frames]))
     out.add("sts.res", bytes(res))
     out.add("dip.index", bytes(index))
 
@@ -469,10 +532,11 @@ def main() -> int:
     convert_aswd(src, lang)
     lang.write(os.path.join(outdir, "en_us.dat"))
 
-    print("voice data:")
-    voice = Container()
-    convert_voice(src, voice)
-    voice.write(os.path.join(outdir, "cmu_us_kal.dat"))
+    for name in VOICES:
+        print("voice data:")
+        voice = Container()
+        convert_voice(src, voice, name)
+        voice.write(os.path.join(outdir, f"{name}.dat"))
     return 0
 
 

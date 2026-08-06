@@ -33,11 +33,86 @@ pub fn analyse(lang: &Language, tokens: &[Token], params: &VoiceParams) -> Utter
     phrase(lang, &mut utt);
     insert_pronunciations(lang, &mut utt);
     insert_pauses(&mut utt);
-    apply_postlexical_rules(&mut utt);
+    apply_postlexical_rules(&mut utt, params);
     predict_intonation(lang, &mut utt);
     predict_durations(lang, &mut utt, params.duration_stretch);
     predict_f0(&mut utt, params);
     utt
+}
+
+/// Build the structure for a string of phones, skipping text analysis.
+///
+/// The caller has already decided what is to be said, so there is no lexicon,
+/// no phrasing and no accent prediction: the tokens become segments directly.
+/// This is upstream's `synth_method_phones`.
+///
+/// The duration and F0 models do still run. Upstream's table names a flat
+/// contour here, but each entry is only a fallback for what the voice itself
+/// supplies, and every voice supplies an F0 model, so the flat one is never
+/// what actually happens. Accents are the opposite case: the table names
+/// nothing and no voice fills it in, so every syllable is unaccented and the
+/// F0 model sees that.
+///
+/// A token of `-` is a syllable boundary, and a trailing `0` or `1` on a phone
+/// sets the stress of the syllable it is in.
+pub fn analyse_phones(lang: &Language, tokens: &[Token], params: &VoiceParams) -> Utterance {
+    let mut utt = Utterance::new();
+    build_token_relation(&mut utt, tokens);
+    phones_to_segments(&mut utt);
+    tag_parts_of_speech(lang, &mut utt);
+    predict_durations(lang, &mut utt, params.duration_stretch);
+    predict_f0(&mut utt, params);
+    utt
+}
+
+/// Turn each token into a segment, in one word and however many syllables the
+/// input asked for.
+fn phones_to_segments(utt: &mut Utterance) {
+    let segment_rel = utt.create_relation("Segment");
+    let syllable_rel = utt.create_relation("Syllable");
+    let word_rel = utt.create_relation("Word");
+    let sylstructure_rel = utt.create_relation("SylStructure");
+
+    let mut word: Option<ItemId> = None;
+    let mut syllable: Option<ItemId> = None;
+    let tokens: Vec<ItemId> = utt.iter_relation("Token").collect();
+
+    for token in tokens {
+        let word_node = *word.get_or_insert_with(|| {
+            let item = utt.append(word_rel, None);
+            utt.set_str(item, "name", "phonestring");
+            utt.append(sylstructure_rel, Some(item))
+        });
+        let syllable_node = *syllable.get_or_insert_with(|| {
+            let item = utt.append(syllable_rel, None);
+            utt.add_daughter(word_node, Some(item))
+        });
+
+        let name = utt.name(token).to_string();
+        let (name, stress) = match name.strip_suffix(['0', '1']) {
+            Some(bare) => (bare, &name[name.len() - 1..]),
+            None => (name.as_str(), ""),
+        };
+        if !stress.is_empty() {
+            utt.set_str(syllable_node, "stress", stress);
+        }
+
+        if name == "-" {
+            syllable = None;
+        } else if phoneset::phone_id(name).is_some() {
+            let segment = utt.append(segment_rel, None);
+            utt.set_str(segment, "name", name);
+            utt.add_daughter(syllable_node, Some(segment));
+        }
+        // An unknown phone is dropped. Upstream aborts the process instead,
+        // which a library has no business doing.
+        //
+        // Upstream also appends the segment before deciding what the token is,
+        // so a `-` leaves a nameless one behind and the duration model then
+        // reads a name that is not there. That aborts `flite -p` outright, so
+        // there is nothing to be bit-exact with: the syllable break its own
+        // documentation describes is implemented here instead.
+    }
 }
 
 fn build_token_relation(utt: &mut Utterance, tokens: &[Token]) {
@@ -185,10 +260,12 @@ fn insert_pauses(utt: &mut Utterance) {
 
 /// Post-lexical rules: adjustments that only make sense once neighbouring
 /// words are known.
-fn apply_postlexical_rules(utt: &mut Utterance) {
+fn apply_postlexical_rules(utt: &mut Utterance, params: &VoiceParams) {
     possessive_s(utt);
     the_before_vowel(utt);
-    fold_ah_to_aa(utt);
+    if params.fold_ah_to_aa {
+        fold_ah_to_aa(utt);
+    }
 }
 
 /// English `'s` and `'d`/`'ll`/`'ve` need an epenthetic schwa after some
@@ -239,8 +316,9 @@ fn the_before_vowel(utt: &mut Utterance) {
     }
 }
 
-/// The kal diphone database records this vowel as `aa`; the dictionary writes
-/// some of the same tokens as `ah`. Folding here keeps diphone lookup total.
+/// A voice whose database records this vowel only as `aa` needs the `ah` the
+/// dictionary writes rewritten, or diphone lookup misses. Whether that applies
+/// is a property of the voice: see [`VoiceParams::fold_ah_to_aa`].
 fn fold_ah_to_aa(utt: &mut Utterance) {
     let segments: Vec<ItemId> = utt.iter_relation("Segment").collect();
     for seg in segments {

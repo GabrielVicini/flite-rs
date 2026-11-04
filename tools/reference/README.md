@@ -1,6 +1,7 @@
 # Verifying against upstream Flite
 
-`flite-rs` produces the same samples as CMU Flite for the `cmu_us_kal` voice,
+`flite-rs` produces the same samples as CMU Flite — for the diphone voices
+`cmu_us_kal` and `cmu_us_kal16`, and for the Clustergen voice `cmu_us_slt` —
 byte for byte. That property is the reason the crate exists, so it is checked
 rather than assumed: this directory builds a real Flite and compares its output
 with ours over a corpus, sample by sample.
@@ -32,11 +33,16 @@ reference into FMA, and it is the reference that has to hold still. Without the
 flag, whether this test passes depends on which compiler built it.
 
   `reffile`    text file in, WAV out. Trailing `NAME=VALUE` arguments set voice
-               features, and `voice=kal16` picks the 16 kHz voice, which is how
-               the paths a voice does not ask for by itself get exercised.
+               features, and `voice=NAME` picks the voice: `kal16` for the
+               16 kHz diphone one, `slt` for Clustergen. That is how the paths
+               a voice does not ask for by itself get exercised.
   `refdump`    the linguistic structure of one sentence. `-p` reads it as
                phones, `-u` adds the selected units and output pitch marks.
   `refphones`  a phone string in, WAV out.
+  `reftrack`   everything Clustergen predicts for one sentence short of the
+               waveform: state durations, the parameter track, the band
+               strengths and the MLPG result. `-f` instead prints every feature
+               the state duration tree consults, for every state.
 
 Upstream's own `flite_main.c` is not used: it includes `<sys/time.h>` and
 `<unistd.h>`, which MSVC does not have. The small drivers here replace it.
@@ -50,14 +56,125 @@ cargo test --release --test reference
 The test synthesises every line of `corpus.txt` with both engines and requires
 every sample to match. It also feeds the whole corpus through as a single file,
 which is the only thing that exercises a chunk boundary inside a token or a
-sentence break across one. Add `--features kal16` to check the 16 kHz voice too.
-Without the reference binary the tests report that they were skipped and pass,
-so a plain checkout still runs green.
+sentence break across one. Add `--features kal16` to check the 16 kHz voice and
+`--features clustergen` to check the Clustergen one. Without the reference
+binary the tests report that they were skipped and pass, so a plain checkout
+still runs green.
 
 `reffile` uses `flite_file_to_speech`, not `flite_text_to_speech`. The former
 splits its input into sentences, which is what `Engine::synthesize` does; the
 latter treats the whole input as one utterance and will disagree with us on
 anything longer than a sentence for reasons that have nothing to do with a bug.
+
+## Verifying Clustergen
+
+Clustergen is checked three ways, and the order matters because each is sharper
+than the last at saying *where* a divergence is.
+
+`the_clustergen_voice_matches_upstream` is the corpus comparison, every line,
+sample for sample, through `reffile voice=slt`.
+
+`reading_a_file_in_chunks_matches_upstream_on_clustergen` runs the whole corpus
+as one file, which is the only test that covers the excitation's continuity
+across sentences — see the pinned-generator section below for why that is a
+property at all.
+
+`clustergen_trajectories_match_upstream` compares what `reftrack` prints
+against what the engine predicts: the segment end times, the HMM states with
+their durations, the parameter track after F0 splining and rescaling, the band
+strengths, and the track after MLPG. These are compared as bit patterns, not
+approximately, because both sides are deterministic there. This is the test to
+read first when something breaks: it names the stage. It also covers the MLPG
+smoothing, which the waveform tests only reach through the vocoder.
+
+`examples/cgtrack.rs` prints the same format as `reftrack`, so the two diff:
+
+```bash
+tools/reference/build/reftrack "The quick brown fox." > ref.txt
+cargo run --release --features clustergen --example cgtrack -- \
+    "The quick brown fox." > ours.txt
+diff ref.txt ours.txt
+```
+
+Whichever section differs first names the stage. `SEGMENTS` and `STATES` are
+the state duration trees; `PARAM` is the F0 and parameter trees, the model
+store and the F0 splining; `STR` is the band strengths; `MLPG` is the
+smoothing. If every section agrees and the audio still differs, it is the
+vocoder.
+
+When the end times differ and the phones do not, `-f` on both sides prints
+every feature the duration tree consults and the first differing column names
+the feature:
+
+```bash
+tools/reference/build/reftrack -f "+49." > ref.txt
+cargo run --release --features clustergen --example cgtrack -- -f "+49." > ours.txt
+diff ref.txt ours.txt
+```
+
+That is how the `+` normalisation bug was found, in one step, after the audio
+comparison had only said "sample 165515 of 234480".
+
+### The pinned pseudo-random generator
+
+Upstream's MLSA vocoder draws unvoiced excitation from the C library's
+`rand()`:
+
+```c
+static double plus_or_minus_one()
+{
+    /* not sure rand() is portable */
+    if (rand() > RAND_MAX/2.0)
+        return 1.0;
+    else
+        return -1.0;
+}
+```
+
+Its own comment is right, and this matters more than it looks. `rand()` is not
+specified by the C standard beyond its range, `srand` is never called, and with
+mixed excitation — which all three Clustergen voices upstream ships in-tree ask
+for — it is consumed on *every output sample*. glibc's `rand()` is the TYPE_3
+additive-feedback generator of `random()`; MSVC's is a 32-bit LCG; they agree on
+nothing. So a stock Flite's Clustergen waveform is a function of the C library
+that built it, and "bit-identical to upstream" is not a well-defined question
+without naming an upstream.
+
+This is the same class of problem as `-ffp-contract=off` above, and it gets the
+same answer: an unspecified property of the C environment is pinned so that the
+reference holds still, rather than being inherited from whichever compiler built
+it. What it is pinned to is **glibc's `rand()`**, because that is what upstream
+is overwhelmingly built and distributed with and what CI uses.
+
+`refrand.c` reimplements that generator and `refrand.h` is force-included ahead
+of every translation unit — `-include` on `cc`, `/FI` on MSVC — which is where
+`rand` is redirected to it and `RAND_MAX` is set to glibc's.
+`src/clustergen/random.rs` is the engine's half, and its tests check the
+sequence against the values `rand()` is universally known to produce from the
+default seed.
+
+The consequence, stated plainly:
+
+- On a glibc host the shim reproduces exactly the sequence the real `rand()`
+  would have returned, so the reference behaves as unmodified upstream and the
+  comparison is against stock Flite.
+- On MSVC, musl or a BSD it makes the reference behave as it would have on
+  glibc, so the comparison can run there at all. What is being compared is then
+  not that host's stock Flite.
+
+Both sides are pinned to one documented generator rather than to the host, which
+is the only arrangement under which the question has an answer. Removing the
+force-include is not a cleanup; it makes the Clustergen comparison depend on the
+compiler, exactly as removing `-ffp-contract=off` does.
+
+A second consequence is behavioural rather than about testing. Because the
+generator is process-global upstream, the second sentence of one
+`flite_file_to_speech` call continues the sequence the first left off: two
+sentences spoken together are not the same audio as the same two spoken
+separately. `Backend::start` exists so that `flite-rs` can match that — it opens
+a run that the utterances of one synthesis call share — and the whole-corpus
+test is what pins it. A backend that restarted its excitation per utterance
+passes the per-sentence comparison and fails that one in the second sentence.
 
 ## When something diverges
 
@@ -91,6 +208,12 @@ postlexical rules and the pitch range belong to the voice.
 If those sections agree and the audio still differs, the divergence is in unit
 selection or in the pitch marks. `refdump -u` prints both, and the engine will
 print its own if `FLITE_DEBUG_UNITS` is set.
+
+For a Clustergen voice this bisection order is different, because its durations
+and pitch come from its own trees rather than from the stages above: use
+`reftrack` against `cgtrack`, as the Clustergen section describes. Step 1 still
+applies — phones first, always — and `refdump -p` and `-u` do not, since
+Clustergen selects no units.
 
 `refdump` synthesises its argument as a single utterance, so give it one
 sentence. For anything longer, compare audio with `reffile`.

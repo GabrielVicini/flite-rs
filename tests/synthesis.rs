@@ -513,3 +513,276 @@ fn synthesis_is_deterministic() {
     let text = "Determinism matters for testing.";
     assert_eq!(e.synthesize(text).samples, e.synthesize(text).samples);
 }
+
+// ---------------------------------------------------------------------------
+// Clustergen.
+//
+// What upstream agrees with is checked in tests/reference.rs; these are the
+// properties that hold with or without a reference binary to compare against.
+// ---------------------------------------------------------------------------
+
+/// The Clustergen voice goes through the ordinary voice-selection mechanism,
+/// and nothing on its path is diphone-specific.
+#[cfg(feature = "clustergen")]
+#[test]
+fn the_clustergen_voice_is_selected_like_any_other() {
+    let mut engine = flite_rs::Engine::new();
+    let names: Vec<&str> = engine.voice_names().collect();
+    assert!(names.contains(&"slt"), "voices are {names:?}");
+    assert!(names.contains(&"kal"), "voices are {names:?}");
+
+    // The default is still the diphone voice: a feature should add a choice,
+    // not change what a caller who asked for nothing hears.
+    assert_eq!(engine.voice_name(), "kal");
+    assert_eq!(engine.sample_rate(), 8000);
+
+    assert!(engine.select_voice("slt"));
+    assert_eq!(engine.voice_name(), "slt");
+    assert_eq!(engine.sample_rate(), 16000);
+
+    let audio = engine.synthesize("Hello from Clustergen.");
+    assert_eq!(audio.sample_rate, 16000);
+    assert!(
+        audio.duration_seconds() > 0.8,
+        "expected over a second, got {}",
+        audio.duration_seconds()
+    );
+    assert!(audio.samples.iter().any(|s| *s != 0), "audio is silent");
+}
+
+/// The voice data names the backend; nothing maps a voice name to a
+/// synthesiser.
+#[cfg(feature = "clustergen")]
+#[test]
+fn the_backend_is_chosen_by_the_voice_data() {
+    use flite_rs::data::{BackendKind, Container};
+
+    let diphone = Container::parse(flite_rs::KAL_VOICE_DATA).expect("bundled data is valid");
+    assert_eq!(diphone.backend().unwrap(), BackendKind::Diphone);
+
+    let clustergen = Container::parse(flite_rs::SLT_VOICE_DATA).expect("bundled data is valid");
+    assert_eq!(clustergen.backend().unwrap(), BackendKind::Clustergen);
+
+    // And a voice asking for the wrong one is refused rather than mis-parsed.
+    assert!(flite_rs::DiphoneVoice::parse(flite_rs::SLT_VOICE_DATA).is_err());
+    assert!(flite_rs::clustergen::ClustergenVoice::parse(flite_rs::KAL_VOICE_DATA).is_err());
+}
+
+/// Switching voices switches synthesiser, and neither leaks into the other.
+#[cfg(feature = "clustergen")]
+#[test]
+fn the_two_backends_coexist_in_one_engine() {
+    let mut engine = flite_rs::Engine::new();
+    let text = "This is a test of two voices.";
+
+    let diphone = engine.synthesize(text);
+    assert!(engine.select_voice("slt"));
+    let clustergen = engine.synthesize(text);
+    assert!(engine.select_voice("kal"));
+    let diphone_again = engine.synthesize(text);
+
+    assert_eq!(diphone.sample_rate, 8000);
+    assert_eq!(clustergen.sample_rate, 16000);
+    // Selecting the statistical voice and coming back leaves the diphone
+    // voice exactly as it was.
+    assert_eq!(diphone.samples, diphone_again.samples);
+    // And the two are genuinely different synthesisers, not one rate-shifted.
+    assert_ne!(diphone.samples.len() * 2, clustergen.samples.len());
+}
+
+/// Clustergen declines the language's prosody models and supplies its own.
+///
+/// If the pipeline ran them anyway the segment end times would be the duration
+/// model's rather than the state trees', and there would be a `Target`
+/// relation that nothing reads.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_predicts_its_own_durations_and_pitch() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+    assert!(!engine.params().segment_duration_model);
+    assert!(!engine.params().f0_target_model);
+
+    let utt = engine.analyse("Hello world.");
+    assert!(
+        utt.head_of("Target").is_none(),
+        "the F0 target model ran for a voice that declined it"
+    );
+    // The duration model did not run, so no segment has an end time yet: the
+    // backend fills them in from its own state durations.
+    let first = utt.head_of("Segment").expect("there are segments");
+    assert_eq!(utt.feature_f32(first, "end"), 0.0);
+
+    // The diphone voice still gets both.
+    assert!(engine.select_voice("kal"));
+    assert!(engine.params().segment_duration_model);
+    let utt = engine.analyse("Hello world.");
+    assert!(utt.head_of("Target").is_some());
+    let first = utt.head_of("Segment").expect("there are segments");
+    assert!(utt.feature_f32(first, "end") > 0.0);
+}
+
+/// Synthesis annotates the utterance with the structure Clustergen works on.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_builds_the_frame_structure_it_predicts_on() {
+    use flite_rs::clustergen::ClustergenVoice;
+
+    let voice = ClustergenVoice::parse(flite_rs::SLT_VOICE_DATA).expect("bundled data is valid");
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+    let params = *engine.params();
+    let mut utt = engine.analyse("Hello world.");
+
+    let predicted = voice.trajectories(&mut utt, &params);
+
+    let segments = utt.iter_relation("Segment").count();
+    let states = utt.iter_relation("HMMstate").count();
+    let frames = utt.iter_relation("mcep").count();
+    assert!(segments > 0);
+    // Three states per phone in this voice, so the states outnumber the
+    // segments and the frames outnumber the states.
+    assert!(states > segments, "{states} states for {segments} segments");
+    assert!(frames > states, "{frames} frames for {states} states");
+    assert_eq!(frames, predicted.track.len());
+    assert_eq!(frames, predicted.smoothed.len());
+    assert_eq!(frames, predicted.strengths.len());
+
+    // Five bands of mixed excitation, and the smoothed track is F0 plus the
+    // static cepstrum.
+    assert_eq!(predicted.strengths[0].len(), 5);
+    assert_eq!(predicted.smoothed[0].len(), 26);
+    assert_eq!(predicted.track[0].len(), 102);
+
+    // Segment end times rise and the last one is where the audio ends.
+    let ends: Vec<f32> = utt
+        .iter_relation("Segment")
+        .map(|s| utt.feature_f32(s, "end"))
+        .collect();
+    assert!(ends.windows(2).all(|w| w[1] > w[0]), "{ends:?}");
+}
+
+/// The excitation continues across the sentences of one call.
+///
+/// Not an incidental property: upstream's pseudo-random source is global, so
+/// the second sentence of a call is not the second sentence spoken alone, and
+/// matching that is what `reading_a_file_in_chunks_matches_upstream_on_clustergen`
+/// checks against the real thing. Here it is checked without a reference.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_speech_is_one_continuous_run_per_call() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+
+    let first = engine.synthesize("Wow!!!");
+    let second = engine.synthesize("Really???");
+    let both = engine.synthesize("Wow!!! Really??? ");
+
+    assert_eq!(
+        both.samples.len(),
+        first.samples.len() + second.samples.len()
+    );
+    // The first sentence is the same either way, because the run starts fresh.
+    assert_eq!(both.samples[..first.samples.len()], first.samples[..]);
+    // The second is not, because by then the excitation has moved on.
+    assert_ne!(&both.samples[first.samples.len()..], &second.samples[..]);
+}
+
+/// Two calls produce the same audio, so synthesis is still deterministic.
+///
+/// The excitation carries state *within* a call and must not carry it between
+/// calls, or the same text would sound different the second time and the
+/// engine would not be usable from several threads.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_synthesis_is_deterministic_across_calls() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+    let text = "The quick brown fox. It jumped over the lazy dog.";
+    assert_eq!(
+        engine.synthesize(text).samples,
+        engine.synthesize(text).samples
+    );
+
+    // And from a second engine, which is what a thread would hold.
+    let mut other = flite_rs::Engine::new();
+    assert!(other.select_voice("slt"));
+    assert_eq!(
+        engine.synthesize(text).samples,
+        other.synthesize(text).samples
+    );
+}
+
+/// Streaming hands over exactly the samples the buffered call returns.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_streaming_matches_the_buffered_call() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+    let text = "One sentence. Then another one.";
+
+    let buffered = engine.synthesize(text);
+    let mut streamed = Vec::new();
+    engine.synthesize_streaming(text, |block| {
+        streamed.extend_from_slice(block);
+        flite_rs::Flow::Continue
+    });
+    assert_eq!(buffered.samples, streamed);
+}
+
+/// Prosody controls reach the statistical backend too.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_responds_to_the_prosody_controls() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+    let text = "Testing one two three.";
+
+    let normal = engine.synthesize(text).samples.len();
+    engine.set_duration_stretch(1.8);
+    let slow = engine.synthesize(text).samples.len();
+    assert!(slow > normal, "normal {normal}, slow {slow}");
+
+    engine.set_duration_stretch(1.0);
+    engine.set_f0_shift(1.4);
+    let higher = engine.synthesize(text);
+    // Pitch does not change the length, but it does change the samples.
+    assert_eq!(higher.samples.len(), normal);
+    assert_ne!(higher.samples.len(), 0);
+}
+
+/// Empty and awkward input is as harmless here as on the diphone path.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_survives_awkward_input() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+    assert!(engine.synthesize("").samples.is_empty());
+    assert!(engine.synthesize("   \n ").samples.is_empty());
+    for text in ["pau", ".", "!?", "a", "zzz", "\u{1F600}", "1 2 3"] {
+        let _ = engine.synthesize(text);
+    }
+}
+
+/// A sink can stop a Clustergen run part-way.
+#[cfg(feature = "clustergen")]
+#[test]
+fn a_sink_can_stop_clustergen_early() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"));
+    let full = engine
+        .synthesize("One. Two. Three. Four. Five.")
+        .samples
+        .len();
+
+    let mut taken = 0usize;
+    engine.synthesize_streaming("One. Two. Three. Four. Five.", |block| {
+        taken += block.len();
+        if taken > 1000 {
+            flite_rs::Flow::Stop
+        } else {
+            flite_rs::Flow::Continue
+        }
+    });
+    assert!(taken > 0 && taken < full, "took {taken} of {full}");
+}

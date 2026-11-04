@@ -6,16 +6,19 @@
 
 Text-to-speech in pure Rust. Small, fast, and dependency-free.
 
-A clean-room implementation of the diphone concatenative synthesis used by CMU's
-Flite and Festival: CART-based duration, phrasing and intonation models,
-rule-based letter-to-sound, and residual-excited LPC waveform generation. No C,
-no FFI, no `build.rs`, no `unsafe`. The models and the voice are embedded in the
-binary, so there is nothing to install and nothing to load at runtime.
+A clean-room implementation of the synthesis used by CMU's Flite and Festival:
+CART-based duration, phrasing and intonation models, rule-based
+letter-to-sound, and two waveform backends — residual-excited LPC over a
+diphone database, and Clustergen statistical parametric synthesis through an
+MLSA filter. No C, no FFI, no `build.rs`, no `unsafe`. The models and the
+voices are embedded in the binary, so there is nothing to install and nothing
+to load at runtime.
 
 Feel free to check out the [WebAssembly live demo](https://flite-rs.vicini.io/).
 
-Ships with `cmu_us_kal` (8 kHz, male, US English), optionally the same speaker
-at 16 kHz, and US English text handling.
+Ships with `cmu_us_kal` (8 kHz, male, US English) and US English text handling;
+optionally the same speaker at 16 kHz, and the `cmu_us_slt` Clustergen voice
+(16 kHz, female).
 
 ## Install
 
@@ -78,17 +81,50 @@ build one and reuse it.
 
 ### Voices
 
-The 8 kHz `kal` voice is built in. The `kal16` feature adds the same speaker at
-16 kHz, which sounds considerably better and costs about 4 MB, since its
-recordings are not compressed:
+The 8 kHz `kal` voice is built in. Two features add more, and both are off by
+default because each costs binary size and because a build flag should add a
+choice rather than change what a caller who asked for nothing hears:
+
+| feature      | voice                | adds   | notes                              |
+| ------------ | -------------------- | ------ | ---------------------------------- |
+| `kal16`      | `kal16`, 16 kHz male | ~4 MB  | the same speaker and recordings, uncompressed |
+| `clustergen` | `slt`, 16 kHz female | ~2.5 MB | a different synthesiser, not a second database |
 
 ```toml
-flite-rs = { version = "0.2.0", features = ["kal16"] }
+flite-rs = { version = "0.2.0", features = ["kal16", "clustergen"] }
 ```
 
 ```rust
 engine.select_voice("kal16");
+engine.select_voice("slt");
 ```
+
+Neither feature adds a dependency, and `--no-default-features` stays
+dependency-free.
+
+#### Clustergen
+
+`slt` is not another diphone database; it is a different technique behind the
+same API. There are no recordings in it. Speech is modelled as a trajectory
+through a mel-cepstral parameter space: each phone is split into the sub-phone
+states its models were trained on, filled with frames at 200 a second, and each
+frame is classified by a regression tree into a cluster whose mean and variance
+say what the spectrum should be there. [Maximum-likelihood parameter
+generation](src/clustergen/mlpg.rs) then solves for the smoothest trajectory
+consistent with those distributions and their deltas, and an [MLSA
+filter](src/clustergen/mlsa.rs) excites it with a pulse train, noise, or a
+mixture of the two in five bands.
+
+It sounds quite different from the diphone voices — smoother and more muffled,
+which is the characteristic trade of statistical parametric synthesis — and it
+is a little slower, because a frame of MLSA costs more than a pitch period of
+LPC.
+
+Which backend a voice uses is read from the voice file, not decided by its
+name, so adding a third needs no change to `Engine`. See
+[`src/voice.rs`](src/voice.rs) for the seam and
+[`docs/clustergen-voice-data.md`](docs/clustergen-voice-data.md) for where the
+voice data comes from.
 
 ### Command line
 
@@ -116,13 +152,33 @@ parameters, `-lv` lists the voices and `-b` benchmarks.
 
 ## Compatibility
 
-Output is bit-identical to upstream Flite, for both voices, for text and for
-phone strings. A corpus covering Flite's own text-normalisation regression
-tests, numbers, money, dates, phone numbers, abbreviations, place names and
-nonsense words is synthesised by both engines and compared sample by sample on
-every test run; so is the whole corpus as one file, a quarter of an hour of
-continuous speech in a single pass. `tools/reference` builds the Flite it is
-checked against.
+Output is bit-identical to upstream Flite, for all three voices, for both
+backends, for text and for phone strings. A corpus covering Flite's own
+text-normalisation regression tests, numbers, money, dates, phone numbers,
+abbreviations, place names and nonsense words is synthesised by both engines and
+compared sample by sample on every test run; so is the whole corpus as one file,
+a quarter of an hour of continuous speech in a single pass. For Clustergen the
+predicted trajectories are compared too — state durations, F0 contour,
+parameter track and the MLPG result — so that a divergence lands on a named
+stage rather than on a sample number. `tools/reference` builds the Flite it is
+all checked against, and its README explains how.
+
+Clustergen comes with one qualification that the diphone path does not have,
+and it is upstream's rather than ours. Its vocoder draws unvoiced excitation
+from the C library's `rand()`, whose sequence is not specified by the C standard
+and which upstream never seeds; glibc's and MSVC's agree on nothing, and with
+mixed excitation — which every Clustergen voice upstream ships asks for — it is
+consumed on every output sample. So a stock Flite's Clustergen waveform is a
+function of the C library that built it, and "bit-identical to upstream" needs
+a particular upstream to mean anything.
+
+`flite-rs` reimplements glibc's generator, because that is what upstream is
+overwhelmingly built and distributed with. Against a glibc-built Flite the match
+is therefore against stock upstream. Elsewhere the reference build substitutes
+the same generator, so that the comparison can run at all — the same reasoning
+and the same mechanism as the floating-point contraction flags that reference
+build already pins. `src/clustergen/random.rs` and
+`tools/reference/refrand.c` are the two halves of it.
 
 Three intentional deviations, all cases where upstream is wrong:
 
@@ -138,6 +194,12 @@ Three intentional deviations, all cases where upstream is wrong:
 
 A syllable break in a phone string, `-`, aborts upstream `flite -p` outright.
 Here it does what upstream's own documentation says it should.
+
+Clustergen's excitation continues across the sentences of one synthesis call,
+as upstream's global `rand()` does, and starts afresh on the next call. So
+`synthesize` on two sentences is not `synthesize` twice, which is upstream's
+behaviour and not a choice made here; synthesis is still deterministic, since
+every call starts from the same state.
 
 ## Performance
 
@@ -198,12 +260,26 @@ of a tree in `SylStructure`, sharing one feature set. The trained models query
 the graph through feature paths (`src/ffeature.rs`) such as
 `R:SylStructure.parent.parent.gpos`, parsed once when the models load.
 
-The voice (`src/voice.rs`) generates the waveform from diphones, recorded
-transitions from the middle of one phone to the middle of the next, so joins
-fall in the steady part of a sound. The pitch contour becomes a sequence of
-pitch marks; each output pitch period takes its LPC coefficients and excitation
-from the nearest period of the selected unit, and the result runs through the
-synthesis filter in `src/dsp.rs`.
+The second stage is a *backend* (`src/voice.rs`), and there are two of them.
+`Backend` is the trait at the seam: a run of speech in, samples out. `Engine`
+holds `Arc<dyn Backend>` rather than being generic, because one engine holds
+voices of different kinds at once; dispatch is one virtual call per utterance.
+Which backend a voice uses is named in its data file, so adding a third needs no
+change to `Engine` and nothing in `src/` maps a voice name to a technique.
+
+The diphone backend (`src/diphone.rs`) generates the waveform from diphones,
+recorded transitions from the middle of one phone to the middle of the next, so
+joins fall in the steady part of a sound. The pitch contour becomes a sequence
+of pitch marks; each output pitch period takes its LPC coefficients and
+excitation from the nearest period of the selected unit, and the result runs
+through the synthesis filter in `src/dsp.rs`.
+
+The Clustergen backend (`src/clustergen/`) has no recordings. It splits each
+phone into HMM states, lays frames over them at a fixed rate, classifies each
+frame into a cluster of mel-cepstral parameters, smooths the resulting
+trajectory with MLPG and runs it through an MLSA filter. It predicts its own
+durations and pitch, so it declines the pipeline's segment-duration and F0
+target models — which is how upstream arranges it too.
 
 | Module | Responsibility |
 |---|---|
@@ -213,7 +289,9 @@ synthesis filter in `src/dsp.rs`.
 | `cart`, `ffeature`, `value` | Decision trees and the feature language they query |
 | `utterance` | The relation graph |
 | `pipeline` | Stage ordering and prosody models |
-| `voice`, `dsp` | Unit selection and waveform generation |
+| `voice` | The backend seam: `Backend`, `Speaking`, `VoiceProfile`, `VoiceParams` |
+| `diphone`, `dsp` | Unit selection and residual-excited LPC |
+| `clustergen` | Statistical parametric synthesis: trees, MLPG, MLSA |
 | `data`, `language` | Reading the embedded data files |
 
 To inspect the analysis of a sentence without generating audio:
@@ -225,6 +303,17 @@ $ cargo run --example analysis -- "Hello, and welcome."
 It prints the phones with their end times, the intonation decisions and the
 pitch contour, in the same format `tools/reference/refdump` prints them, so the
 two can be diffed when something diverges.
+
+For Clustergen there is a second one, printing everything it predicts short of
+the waveform against the format `tools/reference/reftrack` prints:
+
+```console
+$ cargo run --features clustergen --example cgtrack -- "Hello, and welcome."
+```
+
+With `-f` it prints instead every feature the state duration tree consults, for
+every state, which is what to reach for when the end times differ and the
+phones do not.
 
 ## Data
 
@@ -241,6 +330,11 @@ only when rebuilding or replacing the data:
 $ python tools/gen_data.py /path/to/flite
 ```
 
+That covers the Clustergen voice too: upstream ships `cmu_us_slt` in-tree as
+generated C arrays, exactly like the diphone data, so no separate `.flitevox`
+download is involved. `docs/clustergen-voice-data.md` records that decision and
+how to reproduce it.
+
 ## Roadmap
 
 - **A `Language` trait.** The pipeline is language-neutral; the models are not.
@@ -254,12 +348,13 @@ $ python tools/gen_data.py /path/to/flite
   finding or recording the data, not writing code.
 - **`no_std` support.**
 
+- **The other two Clustergen voices.** `awb` converts the same way `slt` does.
+  `rms` needs the SPAM F0 model, which is a separate set of trees and is not
+  implemented; `tools/gen_data.py` refuses a voice that asks for it rather than
+  converting something the backend would ignore.
+
 Not planned: SSML, and audio playback. Playback belongs to the caller; owning
 it would mean owning a platform audio dependency.
-
-Clustergen voices (`slt`, `rms`, `awb`) sound better than any diphone voice but
-use statistical parametric synthesis, which would replace everything below the
-linguistic pipeline rather than extend it. Out of scope for now.
 
 ## Contributing
 

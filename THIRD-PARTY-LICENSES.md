@@ -139,3 +139,31 @@ because they published both the methods and the data.
 
 Neither Carnegie Mellon University nor the University of Edinburgh endorses
 this project.
+
+## Clustergen voice data and algorithms
+
+`data/cmu_us_slt.dat` is converted by `tools/gen_data.py` from the Clustergen
+voice CMU Flite ships in its own source tree at `lang/cmu_us_slt`: the state
+duration trees and statistics, the F0 and parameter regression trees, the
+quantised parameter store, the phone-to-state map and the mixed-excitation
+filters. It carries the same CMU terms as the rest of the Flite data recorded
+above, and `docs/clustergen-voice-data.md` records where it comes from and how
+to reproduce the conversion from a pinned upstream revision.
+
+The algorithms reimplemented in `src/clustergen/mlpg.rs` and
+`src/clustergen/mlsa.rs` come with a longer lineage than the rest of this
+crate, and it is worth crediting even though no code crossed over. Upstream's
+`src/cg/cst_mlpg.c` and `src/cg/cst_mlsa.c` are, by their own headers, taken
+from the Nagoya Institute of Technology's HTS by way of Festvox's
+voice-conversion code, extracted and modified by Tomoki Toda
+(tomoki@ics.nitech.ac.jp) and integrated into Flite by Alan W Black
+(awb@cs.cmu.edu). Those files carry the Nagoya Institute of Technology and
+Carnegie Mellon University copyright and the same permissive terms. The
+maximum-likelihood parameter generation and the Mel Log Spectrum Approximation
+filter are their work; what is here is a clean-room Rust implementation of the
+published algorithms, written from the C as a specification.
+
+`src/clustergen/random.rs` reimplements glibc's `random()` from the published
+TYPE_3 additive-feedback algorithm, not from glibc's source. It exists because
+upstream's vocoder calls `rand()`; `tools/reference/refrand.c` is the same
+algorithm on the reference side, and both are explained there.

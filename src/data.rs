@@ -150,6 +150,13 @@ impl<'a> Reader<'a> {
         Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    pub fn f64(&mut self) -> Result<f64> {
+        let b = self.bytes(8)?;
+        Ok(f64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+
     pub fn str(&mut self, len: usize) -> Result<&'a str> {
         std::str::from_utf8(self.bytes(len)?).map_err(|_| DataError("invalid utf-8"))
     }

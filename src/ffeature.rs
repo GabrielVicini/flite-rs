@@ -44,6 +44,10 @@ pub enum Step {
 pub struct FeaturePath {
     steps: Vec<Step>,
     feature: Box<str>,
+    /// The path as it was written. Kept so that a tree can say what it asks,
+    /// which is what makes a feature-by-feature diff against upstream
+    /// possible; it costs one small string per distinct path per tree.
+    source: Box<str>,
 }
 
 impl FeaturePath {
@@ -54,11 +58,17 @@ impl FeaturePath {
         FeaturePath {
             steps: parse_steps(&tokens),
             feature: Box::from(feature),
+            source: Box::from(path),
         }
     }
 
     pub fn feature_name(&self) -> &str {
         &self.feature
+    }
+
+    /// The path as the tree spells it.
+    pub fn as_str(&self) -> &str {
+        &self.source
     }
 }
 
@@ -225,6 +235,50 @@ fn feature_function(utt: &Utterance, item: ItemId, name: &str) -> Option<Value> 
             bool_str(v > 0 && v < 32)
         }
         "token_pos_guess" => Value::str(crate::lang::token_pos_guess(utt.name(item))),
+
+        // Segment features that the diphone models never ask for but the
+        // Clustergen trees do. Upstream registers them unconditionally, so
+        // they are not gated on the feature either: they are plain functions
+        // of the linguistic structure, with nothing Clustergen-specific in
+        // them beyond who happens to consult them.
+        "lisp_onset_stop" => seg_onset_ctype(utt, item, "s"),
+        "lisp_onset_fric" => seg_onset_ctype(utt, item, "f"),
+        "lisp_onset_nasal" => seg_onset_ctype(utt, item, "n"),
+        // A glide is either of two ctypes, and the first match wins.
+        "lisp_onset_glide" => match seg_onset_ctype(utt, item, "r") {
+            v if v.as_str() == "0" => seg_onset_ctype(utt, item, "l"),
+            _ => Value::str("1"),
+        },
+        "lisp_coda_stop" => seg_coda_ctype(utt, item, "s"),
+        "lisp_coda_fric" => seg_coda_ctype(utt, item, "f"),
+        "lisp_coda_nasal" => seg_coda_ctype(utt, item, "n"),
+        "lisp_coda_glide" => match seg_coda_ctype(utt, item, "r") {
+            v if v.as_str() == "0" => seg_coda_ctype(utt, item, "l"),
+            _ => Value::str("1"),
+        },
+        // Festival treats this as a string rather than an int, and the trees
+        // were trained that way.
+        "lisp_is_pau" => bool_str(utt.name(item) == "pau"),
+
+        // Clustergen frame and state features. Each is a position of one mcep
+        // frame within its HMM state or its phone, which is how the trees ask
+        // "how far through this sound are we".
+        "lisp_cg_duration" => cg_duration(utt, item),
+        "lisp_cg_state_pos" => cg_state_pos(utt, item),
+        "lisp_cg_state_place" => cg_span_place(utt, item, Span::State, Place::Fraction),
+        "lisp_cg_state_index" => cg_span_place(utt, item, Span::State, Place::FromStart),
+        "lisp_cg_state_rindex" => cg_span_place(utt, item, Span::State, Place::ToEnd),
+        "lisp_cg_phone_place" => cg_span_place(utt, item, Span::Phone, Place::Fraction),
+        "lisp_cg_phone_index" => cg_span_place(utt, item, Span::Phone, Place::FromStart),
+        "lisp_cg_phone_rindex" => cg_span_place(utt, item, Span::Phone, Place::ToEnd),
+        "lisp_cg_find_phrase_number" => Value::Int(count_back(utt, item)),
+        "lisp_cg_position_in_phrasep" => cg_position_in_phrase(utt, item, true),
+        "lisp_cg_position_in_phrase" => cg_position_in_phrase(utt, item, false),
+        "lisp_cg_position_in_sentence" => cg_position_in_sentence(utt, item),
+        "lisp_cg_break" => cg_break(utt, item),
+        "lisp_cg_syl_ratio" => cg_syl_ratio(utt, item),
+        "lisp_cg_phrase_ratio" => cg_phrase_ratio(utt, item),
+        "lisp_cg_syls_in_phrase" => cg_syls_in_phrase(utt, item),
 
         _ => return None,
     };
@@ -560,6 +614,299 @@ fn segment_duration(utt: &Utterance, item: ItemId) -> Value {
         Some(p) => Value::Float(end - utt.feature_f32(p, "end")),
         None => Value::Float(end),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Clustergen features.
+//
+// Clustergen classifies one *frame* at a time, and its trees ask where that
+// frame sits inside the HMM state and the phone it belongs to. Getting there
+// means walking `R:mcep_link.parent` to the state and `R:segstate.parent` to
+// the segment, which is why every path below starts the same way.
+// ---------------------------------------------------------------------------
+
+/// Which span a frame's position is measured against.
+enum Span {
+    /// The HMM state the frame belongs to.
+    State,
+    /// The whole phone, across all of its states.
+    Phone,
+}
+
+/// How that position is reported.
+enum Place {
+    /// Frames from the start of the span.
+    FromStart,
+    /// Frames to the end of it.
+    ToEnd,
+    /// The fraction of the way through, 0 when the span is one frame wide.
+    Fraction,
+}
+
+/// First and last frame number of the span a frame belongs to.
+fn span_frames(utt: &Utterance, frame: ItemId, span: Span) -> Option<(f32, f32)> {
+    let state = utt
+        .item_as(frame, "mcep_link")
+        .and_then(|v| utt.parent(v))?;
+    let (first, last) = match span {
+        Span::State => (utt.daughter(state)?, utt.last_daughter(state)?),
+        Span::Phone => {
+            // Up to the segment, then down to its first and last state, and
+            // from each of those down to its first and last frame.
+            let seg = utt.item_as(state, "segstate").and_then(|v| utt.parent(v))?;
+            let first_state = utt.daughter(seg)?;
+            let last_state = utt.last_daughter(seg)?;
+            (
+                utt.item_as(first_state, "mcep_link")
+                    .and_then(|v| utt.daughter(v))?,
+                utt.item_as(last_state, "mcep_link")
+                    .and_then(|v| utt.last_daughter(v))?,
+            )
+        }
+    };
+    // Rounded through f32 as upstream does, because the trees were trained on
+    // the result of that cast and not on the integers.
+    Some((
+        utt.feature_i32(first, "frame_number") as f32,
+        utt.feature_i32(last, "frame_number") as f32,
+    ))
+}
+
+fn cg_span_place(utt: &Utterance, frame: ItemId, span: Span, place: Place) -> Value {
+    let Some((start, end)) = span_frames(utt, frame, span) else {
+        return Value::zero();
+    };
+    let this = utt.feature_i32(frame, "frame_number");
+    Value::Float(match place {
+        Place::FromStart => this as f32 - start,
+        Place::ToEnd => end - this as f32,
+        // A span one frame wide would divide by zero; upstream answers 0.0.
+        Place::Fraction if end - start == 0.0 => 0.0,
+        Place::Fraction => (this as f32 - start) / (end - start),
+    })
+}
+
+/// How long the item is: its end time minus the previous one's.
+///
+/// The first item of a relation has no predecessor, so its end time *is* its
+/// duration.
+fn cg_duration(utt: &Utterance, item: ItemId) -> Value {
+    match utt.prev(item) {
+        None => Value::Float(utt.feature_f32(item, "end")),
+        Some(prev) => Value::Float(utt.feature_f32(item, "end") - utt.feature_f32(prev, "end")),
+    }
+}
+
+/// Whether an HMM state begins, continues or ends a run of same-named states.
+fn cg_state_pos(utt: &Utterance, item: ItemId) -> Value {
+    let name = utt.name(item);
+    // A path that runs off the end yields "0", which no state is called, so
+    // the first and last state of the relation compare unequal as intended.
+    let named = |other: Option<ItemId>| other.map_or("0", |o| utt.name(o));
+    if name != named(utt.prev(item)) {
+        return Value::str("b");
+    }
+    if name == named(utt.next(item)) {
+        Value::str("m")
+    } else {
+        Value::str("e")
+    }
+}
+
+/// How many items precede this one in its relation.
+fn count_back(utt: &Utterance, item: ItemId) -> i32 {
+    let mut n = 0;
+    let mut cur = item;
+    while let Some(prev) = utt.prev(cur) {
+        cur = prev;
+        n += 1;
+    }
+    n
+}
+
+/// The frame advance Clustergen's position features assume, in seconds.
+///
+/// Upstream hardcodes this in the feature functions as `CG_FRAME_SHIFT` rather
+/// than reading `frame_advance` off the voice, so a voice with a different
+/// advance would still get this number. Reproduced as written, because the
+/// trees were trained against it.
+const CG_FRAME_SHIFT: f32 = 0.005;
+
+/// From a frame, the phrase it is in.
+fn frame_phrase(utt: &Utterance, frame: ItemId) -> Option<ItemId> {
+    let state = utt
+        .item_as(frame, "mcep_link")
+        .and_then(|v| utt.parent(v))?;
+    let seg = utt.item_as(state, "segstate").and_then(|v| utt.parent(v))?;
+    let word = utt
+        .item_as(seg, "SylStructure")
+        .and_then(|v| utt.parent(v))
+        .and_then(|syl| utt.parent(syl))?;
+    utt.item_as(word, "Phrase").and_then(|v| utt.parent(v))
+}
+
+/// The seconds a run of words spans.
+///
+/// The start is the end of the segment *before* the first one, which is where
+/// that segment begins; the end is the end of the last.
+fn word_span_seconds(utt: &Utterance, first_word: ItemId, last_word: ItemId) -> Option<(f32, f32)> {
+    let first_seg = utt
+        .item_as(first_word, "SylStructure")
+        .and_then(|v| utt.daughter(v))
+        .and_then(|syl| utt.daughter(syl))
+        .and_then(|seg| utt.item_as(seg, "Segment"))?;
+    let last_seg = utt
+        .item_as(last_word, "SylStructure")
+        .and_then(|v| utt.last_daughter(v))
+        .and_then(|syl| utt.last_daughter(syl))
+        .and_then(|seg| utt.item_as(seg, "Segment"))?;
+    // A missing predecessor leaves the path at "0", i.e. 0.0 seconds, which is
+    // right: the utterance starts there.
+    let start = utt
+        .prev(first_seg)
+        .map_or(0.0, |p| utt.feature_f32(p, "end"));
+    Some((start, utt.feature_f32(last_seg, "end")))
+}
+
+/// Where in its phrase a frame falls, as a fraction, optionally offset by the
+/// phrase's own number so that the value keeps rising across the utterance.
+fn cg_position_in_phrase(utt: &Utterance, frame: ItemId, numbered: bool) -> Value {
+    let Some(phrase) = frame_phrase(utt, frame) else {
+        return Value::Float(-1.0);
+    };
+    let Some((start, end)) = utt
+        .daughter(phrase)
+        .zip(utt.last_daughter(phrase))
+        .and_then(|(f, l)| word_span_seconds(utt, f, l))
+    else {
+        return Value::Float(-1.0);
+    };
+    if end - start == 0.0 {
+        return Value::Float(-1.0);
+    }
+    let number = if numbered {
+        count_back(utt, phrase) as f32
+    } else {
+        0.0
+    };
+    let at = CG_FRAME_SHIFT * utt.feature_f32(frame, "frame_number");
+    Value::Float(number + (at - start) / (end - start))
+}
+
+/// Where in the whole sentence a frame falls, as a fraction.
+fn cg_position_in_sentence(utt: &Utterance, frame: ItemId) -> Value {
+    let Some(word) = utt
+        .item_as(frame, "mcep_link")
+        .and_then(|v| utt.parent(v))
+        .and_then(|s| utt.item_as(s, "segstate"))
+        .and_then(|v| utt.parent(v))
+        .and_then(|seg| utt.item_as(seg, "SylStructure"))
+        .and_then(|v| utt.parent(v))
+        .and_then(|syl| utt.parent(syl))
+        .and_then(|w| utt.item_as(w, "Word"))
+    else {
+        return Value::Float(-1.0);
+    };
+    let Some((start, end)) = word_span_seconds(utt, utt.first(word), utt.last(word)) else {
+        return Value::Float(-1.0);
+    };
+    if end - start == 0.0 {
+        return Value::Float(-1.0);
+    }
+    let at = CG_FRAME_SHIFT * utt.feature_f32(frame, "frame_number");
+    Value::Float((at - start) / (end - start))
+}
+
+/// Break level after a syllable, Clustergen's version.
+///
+/// Upstream's comment explains the duplication: phrase prediction differs
+/// enough between Flite and Festival that the CG models were trained against
+/// this reading rather than `syl_break`.
+fn cg_break(utt: &Utterance, syl: ItemId) -> Value {
+    let Some(view) = utt.item_as(syl, "SylStructure") else {
+        return Value::str("0");
+    };
+    if utt.next(view).is_some() {
+        return Value::str("0"); // word internal
+    }
+    let word = utt.parent(view);
+    let next_word = word
+        .and_then(|w| utt.item_as(w, "Word"))
+        .and_then(|w| utt.next(w));
+    if next_word.is_none() {
+        return Value::str("4"); // utterance final
+    }
+    let next_phrase_word = word
+        .and_then(|w| utt.item_as(w, "Phrase"))
+        .and_then(|w| utt.next(w));
+    if next_phrase_word.is_none() {
+        Value::str("3") // phrase final
+    } else {
+        Value::str("1") // word final
+    }
+}
+
+/// How far through its phrase a syllable is, counted in syllables.
+fn cg_syl_ratio(utt: &Utterance, syl: ItemId) -> Value {
+    let inside = feature(utt, syl, "syl_in").as_f32();
+    let outside = feature(utt, syl, "syl_out").as_f32();
+    Value::Float((1.0 + inside) / (1.0 + inside + outside))
+}
+
+/// How far through the utterance a phrase is, counted in phrases.
+fn cg_phrase_ratio(utt: &Utterance, phrase: ItemId) -> Value {
+    let last = utt.last(phrase);
+    Value::Float((1.0 + count_back(utt, phrase) as f32) / (1.0 + count_back(utt, last) as f32))
+}
+
+/// Syllables in a phrase: one, plus however many follow its first.
+fn cg_syls_in_phrase(utt: &Utterance, phrase: ItemId) -> Value {
+    let out = utt
+        .daughter(phrase)
+        .and_then(|w| utt.item_as(w, "SylStructure"))
+        .and_then(|v| utt.daughter(v))
+        .and_then(|syl| utt.item_as(syl, "Syllable"))
+        .map_or(0.0, |syl| feature(utt, syl, "syl_out").as_f32());
+    Value::Float(1.0 + out)
+}
+
+/// Whether the syllable's onset holds a consonant of this type.
+///
+/// The onset is the run of consonants before the syllable's vowel, so the scan
+/// stops at the first vowel either way.
+fn seg_onset_ctype(utt: &Utterance, seg: ItemId, ctype: &str) -> Value {
+    let Some(syl) = utt.item_as(seg, "SylStructure").and_then(|v| utt.parent(v)) else {
+        return Value::str("0");
+    };
+    for s in utt.iter_from(utt.daughter(syl)) {
+        let name = utt.name(s);
+        if phoneset::feature(name, "vc") == "+" {
+            return Value::str("0");
+        }
+        if phoneset::feature(name, "ctype") == ctype {
+            return Value::str("1");
+        }
+    }
+    Value::str("0")
+}
+
+/// The same for the coda, scanned backwards from the end of the syllable.
+fn seg_coda_ctype(utt: &Utterance, seg: ItemId, ctype: &str) -> Value {
+    let Some(syl) = utt.item_as(seg, "SylStructure").and_then(|v| utt.parent(v)) else {
+        return Value::str("0");
+    };
+    let mut cur = utt.last_daughter(syl);
+    while let Some(s) = cur {
+        let name = utt.name(s);
+        if phoneset::feature(name, "vc") == "+" {
+            return Value::str("0");
+        }
+        if phoneset::feature(name, "ctype") == ctype {
+            return Value::str("1");
+        }
+        cur = utt.prev(s);
+    }
+    Value::str("0")
 }
 
 #[cfg(test)]

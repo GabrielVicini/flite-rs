@@ -22,9 +22,23 @@ pub fn is_alpha(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
-/// A decimal number, with optional sign and exponent.
+/// A decimal number, with an optional leading minus and an optional exponent.
+///
+/// A leading `+` is deliberately *not* a number. Upstream's `cst_rx_double`
+/// and `cst_rx_int` admit only `-` before the digits, while the exponent
+/// accepts either sign, so `+49` is not a number token upstream: the `+` is
+/// split off and pronounced as the word `+`, and only `49` is expanded. That
+/// leaves the word named `+` rather than `plus`, and `gpos` answers `content`
+/// for it where it would answer `cc` for `plus` — which changes what the
+/// accent and duration models predict.
+///
+/// Accepting `+` here made `+49` read as `plus forty nine` with the word named
+/// `plus`. It sounds the same and is wrong, and the diphone corpus did not
+/// catch it: in the one line that has a `+`, the trees never reach a question
+/// where the two `gpos` answers part. The Clustergen duration trees do ask,
+/// which is how this surfaced.
 pub fn is_double(s: &str) -> bool {
-    let s = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let s = s.strip_prefix('-').unwrap_or(s);
     let (int, rest) = take_while(s, |b| b.is_ascii_digit());
     let rest = match rest.strip_prefix('.') {
         Some(frac) => {

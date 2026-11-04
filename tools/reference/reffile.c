@@ -16,6 +16,7 @@
 
 cst_voice *register_cmu_us_kal(const char *voxdir);
 cst_voice *register_cmu_us_kal16(const char *voxdir);
+cst_voice *register_cmu_us_slt(const char *voxdir);
 
 int main(int argc, char **argv)
 {
@@ -36,6 +37,10 @@ int main(int argc, char **argv)
 
     if (strcmp(voice, "kal16") == 0)
         v = register_cmu_us_kal16(NULL);
+    else if (strcmp(voice, "slt") == 0)
+        /* The Clustergen voice: a different synthesiser entirely, not another
+           diphone database. */
+        v = register_cmu_us_slt(NULL);
     else
         v = register_cmu_us_kal(NULL);
     if (!v)

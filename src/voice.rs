@@ -5,11 +5,37 @@
 //! halves meet at [`Backend`], and a voice is a [`VoiceProfile`] (what any
 //! synthesiser needs to know) plus one of those.
 //!
-//! [`Backend::synthesise_streaming`] is the primitive, not
-//! [`Backend::synthesise`]. That is deliberate: the crate's constant-memory
-//! guarantee comes from never holding more than one utterance, so the
-//! collecting method is a provided method built on the streaming one and a
-//! backend that cannot stream cannot be written by accident.
+//! Streaming is the primitive, not collecting. That is deliberate: the
+//! crate's constant-memory guarantee comes from never holding more than one
+//! utterance, so [`Backend::synthesise`] is a provided method built on the
+//! streaming path and a backend that cannot stream cannot be written by
+//! accident.
+//!
+//! # Why a run, and not an utterance
+//!
+//! The primitive is [`Backend::start`], which opens a [`Speaking`] run that
+//! then takes utterances one at a time, rather than a single call that takes
+//! one utterance. Diphone synthesis would not have needed that; Clustergen
+//! does, and not for a reason that could be worked around.
+//!
+//! Its vocoder draws unvoiced excitation from the C library's `rand()`, which
+//! upstream keeps in process-global state. Two sentences spoken in one call
+//! are therefore not the same audio as the same two spoken separately: the
+//! second continues the sequence the first left off. A backend called once per
+//! utterance restarts that sequence every sentence and cannot match upstream
+//! on anything longer than one, which is most real input.
+//!
+//! The alternative — state inside the backend — would cost `Engine`'s `&self`
+//! methods, its `Sync`, and its determinism under concurrent use, to express
+//! something that is genuinely per-call. So the run is explicit, each
+//! [`Engine`](crate::Engine) synthesis call opens exactly one, and a backend
+//! with nothing to carry ignores it.
+//!
+//! The utterance is taken by `&mut` because synthesis genuinely annotates it:
+//! Clustergen builds four relations under the segments and writes the segment
+//! end times that its own duration model predicts. Cloning the utterance to
+//! present a `&` signature would hide a real effect and cost a copy for
+//! nothing, and the diphone backend simply does not use the mutability.
 //!
 //! Dispatch is one virtual call per utterance — the backend fills a buffer and
 //! hands it over, so nothing is dispatched per sample.
@@ -91,22 +117,27 @@ pub trait Backend: Send + Sync {
     /// so a backend that predicts its own durations can say so.
     fn profile(&self) -> VoiceProfile;
 
-    /// Generate the waveform for a fully analysed utterance, handing each
-    /// block of samples to `sink` as it is produced.
+    /// Begin one continuous run of speech.
     ///
-    /// Nothing larger than one utterance is held, so a caller that plays or
-    /// writes the audio as it arrives uses memory that does not grow with the
-    /// length of the speech. Returning [`Flow::Stop`] ends synthesis where it
-    /// stands.
+    /// Whatever must not restart between the utterances of one run lives in
+    /// the returned value. The module docs explain why that is a run and not
+    /// an utterance.
+    fn start(&self) -> Box<dyn Speaking + '_>;
+
+    /// Synthesise one utterance on its own, streaming the samples.
+    ///
+    /// A run of exactly one. Returning [`Flow::Stop`] ends it where it stands.
     fn synthesise_streaming(
         &self,
-        utt: &Utterance,
+        utt: &mut Utterance,
         params: &VoiceParams,
         sink: &mut dyn FnMut(&[i16]) -> Flow,
-    );
+    ) {
+        self.start().speak(utt, params, sink);
+    }
 
     /// The same synthesis, collected into one buffer.
-    fn synthesise(&self, utt: &Utterance, params: &VoiceParams) -> Audio {
+    fn synthesise(&self, utt: &mut Utterance, params: &VoiceParams) -> Audio {
         let mut samples = Vec::new();
         self.synthesise_streaming(utt, params, &mut |block| {
             samples.extend_from_slice(block);
@@ -122,6 +153,26 @@ pub trait Backend: Send + Sync {
     fn sample_rate(&self) -> u32 {
         self.profile().sample_rate
     }
+}
+
+/// One run of speech in progress: utterances in, samples out.
+///
+/// Held for as long as the speech is continuous, which for
+/// [`Engine`](crate::Engine) is one synthesis call however many sentences that
+/// call covers.
+pub trait Speaking {
+    /// Speak one utterance, handing each block of samples to `sink` as it is
+    /// produced.
+    ///
+    /// Nothing larger than one utterance is held, so a caller that plays or
+    /// writes the audio as it arrives uses memory that does not grow with the
+    /// length of the speech. Returning [`Flow::Stop`] ends this utterance.
+    fn speak(
+        &mut self,
+        utt: &mut Utterance,
+        params: &VoiceParams,
+        sink: &mut dyn FnMut(&[i16]) -> Flow,
+    );
 }
 
 /// How the selected units are turned into a waveform. Diphone only; the field

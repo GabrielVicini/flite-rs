@@ -47,6 +47,10 @@ SOURCE_DIRS = [
     "lang/usenglish",
     "lang/cmu_us_kal",
     "lang/cmu_us_kal16",
+    # The Clustergen voice. Upstream ships three of these in-tree; slt is the
+    # one flite-rs converts, so it is the one the reference needs to be able
+    # to speak with.
+    "lang/cmu_us_slt",
 ]
 
 # The rest of src/audio is platform-specific output drivers, which the file
@@ -76,9 +80,16 @@ EXCLUDED = {
 
 INCLUDE_DIRS = ["include", "lang/usenglish", "lang/cmulex", "lang/cmu_us_kal"]
 
-# Both voices are linked in, so the reference can be asked for either.
+# Every voice is linked in, so the reference can be asked for any of them.
 
-DRIVERS = ["reffile.c", "refdump.c", "refphones.c"]
+DRIVERS = ["reffile.c", "refdump.c", "refphones.c", "reftrack.c"]
+
+# Compiled into every binary, and force-included ahead of every translation
+# unit, so that the pseudo-random source the Clustergen excitation draws from
+# is a pinned generator rather than the host C library's. refrand.c explains
+# why that is necessary and what it costs.
+PINNED_RANDOM = "refrand.c"
+PINNED_RANDOM_HEADER = "refrand.h"
 
 HERE = Path(__file__).resolve().parent
 
@@ -174,7 +185,8 @@ def build_msvc(root, sources, objdir, outdir):
     # reference if its arithmetic is pinned rather than inherited. The note
     # on -ffp-contract=off in build_cc explains what goes wrong otherwise.
     flags = (
-        f"/nologo /O2 /W0 /MP /fp:precise /D_CRT_SECURE_NO_WARNINGS {includes}"
+        f"/nologo /O2 /W0 /MP /fp:precise /D_CRT_SECURE_NO_WARNINGS "
+        f'/FI"{HERE / PINNED_RANDOM_HEADER}" {includes}'
     )
     commands = []
 
@@ -183,6 +195,7 @@ def build_msvc(root, sources, objdir, outdir):
     # the path.
     into_objdir = f'/Fo"{objdir}\\\\"'
 
+    sources = list(sources) + [HERE / PINNED_RANDOM]
     outdated = [s for s in sources if stale(s, objdir / (s.stem + ".obj"))]
     if outdated:
         response = write_response(objdir / "sources.rsp", outdated)
@@ -212,7 +225,15 @@ def build_cc(root, sources, objdir, outdir):
     # samples of the output differ. Rust never contracts without an explicit
     # fma() call, so the engine cannot follow the reference there, and the
     # reference is the thing that has to hold still.
-    flags = ["-O2", "-w", "-ffp-contract=off", *includes]
+    # -include pins rand() the same way /FI does on MSVC; refrand.c says why.
+    flags = [
+        "-O2",
+        "-w",
+        "-ffp-contract=off",
+        "-include",
+        str(HERE / PINNED_RANDOM_HEADER),
+        *includes,
+    ]
 
     def compile_one(source):
         obj = objdir / (source.stem + ".o")
@@ -223,6 +244,7 @@ def build_cc(root, sources, objdir, outdir):
         )
         return obj
 
+    sources = list(sources) + [HERE / PINNED_RANDOM]
     try:
         with ThreadPoolExecutor() as pool:
             objects = list(pool.map(compile_one, sources))

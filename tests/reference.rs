@@ -191,12 +191,25 @@ fn output_is_identical_to_upstream_flite() {
 /// token streams as much as the audio.
 #[test]
 fn reading_a_file_in_chunks_matches_upstream() {
+    compare_whole_corpus_file(&flite_rs::Engine::new(), &[], "diphone");
+}
+
+/// Feed the whole corpus through as one file and compare the result.
+///
+/// Shared between the backends because this is the only test that exercises a
+/// chunk boundary inside a token, a sentence break across one, and — for a
+/// backend that carries state between sentences — several hundred sentences of
+/// one continuous run.
+fn compare_whole_corpus_file(engine: &flite_rs::Engine, overrides: &[&str], label: &str) {
     let Some(reference) = reference_binary() else {
         println!("skipped: no reference binary");
         return;
     };
 
-    let work = std::env::temp_dir().join(format!("flite-rs-whole-file-{}", std::process::id()));
+    let work = std::env::temp_dir().join(format!(
+        "flite-rs-whole-file-{}-{label}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&work).expect("cannot create a working directory");
     let input = work.join("corpus.txt");
     let output = work.join("out.wav");
@@ -205,12 +218,12 @@ fn reading_a_file_in_chunks_matches_upstream() {
     let status = Command::new(&reference)
         .arg(&input)
         .arg(&output)
+        .args(overrides)
         .status()
         .expect("cannot run the reference");
     assert!(status.success(), "the reference failed on the whole corpus");
     let theirs = wav_samples(&std::fs::read(&output).expect("reference wrote no output"));
 
-    let engine = flite_rs::Engine::new();
     let mut ours = Vec::new();
     engine
         .synthesize_reader(
@@ -226,7 +239,7 @@ fn reading_a_file_in_chunks_matches_upstream() {
     assert_eq!(
         difference(&ours, &theirs, false),
         None,
-        "{} samples of continuous speech",
+        "{} samples of continuous {label} speech",
         theirs.len()
     );
 }
@@ -360,4 +373,323 @@ fn alternative_join_and_resynth_paths_match_upstream() {
         "{} sentences on each alternative path, all bit-identical",
         sentences.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Clustergen.
+//
+// The diphone path never reaches the C library's rand(); Clustergen's
+// excitation does, on every sample. tools/reference/refrand.c explains what is
+// done about that and why the comparison below is still a comparison against
+// upstream rather than against a modified copy of it.
+// ---------------------------------------------------------------------------
+
+/// A reference binary other than `reffile`, if the reference has been built.
+#[cfg(feature = "clustergen")]
+fn reference_tool(name: &str) -> Option<PathBuf> {
+    let exe = reference_binary()?.with_file_name(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    });
+    exe.is_file().then_some(exe)
+}
+
+/// The Clustergen voice, over the whole corpus, sample for sample.
+#[cfg(feature = "clustergen")]
+#[test]
+fn the_clustergen_voice_matches_upstream() {
+    let Some(reference) = reference_binary() else {
+        println!("skipped: no reference binary");
+        return;
+    };
+
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"), "slt is not registered");
+    assert_eq!(engine.sample_rate(), 16000);
+
+    let sentences = corpus();
+    let failures = compare(&reference, &engine, &sentences, &["voice=slt"], false);
+    assert!(
+        failures.is_empty(),
+        "{} of {} sentences diverged on the clustergen voice:\n  {}",
+        failures.len(),
+        sentences.len(),
+        failures.join("\n  ")
+    );
+    println!(
+        "{} sentences through clustergen, all bit-identical",
+        sentences.len()
+    );
+}
+
+/// One section of `reftrack` output: a name, a shape and the numbers.
+#[cfg(feature = "clustergen")]
+struct RefTrack {
+    name: String,
+    rows: usize,
+    columns: usize,
+    values: Vec<f32>,
+}
+
+/// Parse `reftrack`'s dump into its sections.
+///
+/// Values are read back as `f32`. The C side prints `%.9g`, which round-trips
+/// a single-precision value exactly, so this recovers the original bits and
+/// the comparison below is a bit comparison and not a tolerance.
+#[cfg(feature = "clustergen")]
+type RefSegments = Vec<(String, f32)>;
+/// Name, state position within the phone, and end time.
+#[cfg(feature = "clustergen")]
+type RefStates = Vec<(String, i32, f32)>;
+
+#[cfg(feature = "clustergen")]
+fn parse_reftrack(text: &str) -> (RefSegments, RefStates, Vec<RefTrack>) {
+    let mut segments = Vec::new();
+    let mut states = Vec::new();
+    let mut tracks = Vec::new();
+    let mut lines = text.lines().peekable();
+
+    while let Some(line) = lines.next() {
+        let mut parts = line.split_whitespace();
+        let Some(head) = parts.next() else { continue };
+        let numbers: Vec<&str> = parts.collect();
+        match head {
+            "FRAMES" => {}
+            "SEGMENTS" => {
+                let n: usize = numbers[0].parse().expect("a segment count");
+                for _ in 0..n {
+                    let row = lines.next().expect("a segment line");
+                    let (name, end) = row.rsplit_once(' ').expect("name and end time");
+                    segments.push((name.to_string(), end.parse().expect("an end time")));
+                }
+            }
+            "STATES" => {
+                let n: usize = numbers[0].parse().expect("a state count");
+                for _ in 0..n {
+                    let row: Vec<&str> = lines.next().expect("a state line").split(' ').collect();
+                    states.push((
+                        row[0].to_string(),
+                        row[1].parse().expect("a state position"),
+                        row[2].parse().expect("an end time"),
+                    ));
+                }
+            }
+            "PARAM" | "STR" | "MLPG" => {
+                let rows: usize = numbers[0].parse().expect("a row count");
+                let columns: usize = numbers[1].parse().expect("a column count");
+                let mut values = Vec::with_capacity(rows * columns);
+                for _ in 0..rows {
+                    let row = lines.next().expect("a track row");
+                    for token in row.split_whitespace() {
+                        values.push(token.parse().expect("a track value"));
+                    }
+                }
+                tracks.push(RefTrack {
+                    name: head.to_string(),
+                    rows,
+                    columns,
+                    values,
+                });
+            }
+            _ => {}
+        }
+    }
+    (segments, states, tracks)
+}
+
+/// Compare one track against the reference's, reporting where they part.
+#[cfg(feature = "clustergen")]
+fn track_difference(reference: &RefTrack, ours: &[Vec<f32>]) -> Option<String> {
+    if ours.len() != reference.rows {
+        return Some(format!(
+            "{}: {} frames against upstream's {}",
+            reference.name,
+            ours.len(),
+            reference.rows
+        ));
+    }
+    let columns = ours.first().map_or(0, Vec::len);
+    if reference.rows > 0 && columns != reference.columns {
+        return Some(format!(
+            "{}: {columns} channels against upstream's {}",
+            reference.name, reference.columns
+        ));
+    }
+    for (row, frame) in ours.iter().enumerate() {
+        for (column, value) in frame.iter().enumerate() {
+            let theirs = reference.values[row * columns + column];
+            // Bit comparison, not approximate: these stages are deterministic
+            // on both sides and a last-bit difference is a real finding.
+            if value.to_bits() != theirs.to_bits() {
+                return Some(format!(
+                    "{}: frame {row} channel {column} is {value:e} but upstream gives {theirs:e}",
+                    reference.name
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Every Clustergen stage short of the vocoder, compared directly.
+///
+/// This is the sharper of the two Clustergen tests. The waveform comparison
+/// above says whether the output agrees; this says *which stage* disagrees
+/// when it does not, and it covers the MLPG smoothing, which the waveform only
+/// reaches through the vocoder. It also keeps the state duration trees and the
+/// F0 splining honest independently of whether the audio happens to line up.
+#[cfg(feature = "clustergen")]
+#[test]
+fn clustergen_trajectories_match_upstream() {
+    use flite_rs::clustergen::ClustergenVoice;
+
+    let Some(reference) = reference_tool("reftrack") else {
+        println!("skipped: no reftrack binary. Rebuild the reference.");
+        return;
+    };
+
+    let voice = ClustergenVoice::parse(flite_rs::SLT_VOICE_DATA).expect("bundled data is valid");
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"), "slt is not registered");
+    let params = *engine.params();
+
+    // reftrack synthesises its argument as one utterance, so this runs on
+    // single sentences. A slice of the corpus rather than all of it: the
+    // waveform test above already covers every line, and what is under test
+    // here is the stages, which these exercise.
+    let sentences: Vec<String> = corpus()
+        .into_iter()
+        .filter(|s| {
+            !s.contains('.')
+                || s.trim_end()
+                    .strip_suffix('.')
+                    .is_some_and(|r| !r.contains('.'))
+        })
+        .take(40)
+        .collect();
+    assert!(!sentences.is_empty(), "the corpus has single sentences");
+
+    let mut failures = Vec::new();
+    for sentence in &sentences {
+        let output = Command::new(&reference)
+            .arg(sentence)
+            .output()
+            .unwrap_or_else(|e| panic!("cannot run {}: {e}", reference.display()));
+        assert!(output.status.success(), "reftrack failed on {sentence:?}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let (segments, states, tracks) = parse_reftrack(&text);
+
+        let mut utt = engine.analyse(sentence);
+        let predicted = voice.trajectories(&mut utt, &params);
+
+        let mut problem = None;
+
+        // Segment end times first: everything downstream is laid out from
+        // them, so a difference here explains any difference after it.
+        let ours: Vec<(String, f32)> = utt
+            .iter_relation("Segment")
+            .map(|s| (utt.name(s).to_string(), utt.feature_f32(s, "end")))
+            .collect();
+        if ours.len() != segments.len() {
+            problem = Some(format!(
+                "{} segments against upstream's {}",
+                ours.len(),
+                segments.len()
+            ));
+        } else {
+            for (i, (theirs, ours)) in segments.iter().zip(&ours).enumerate() {
+                if theirs.0 != ours.0 || theirs.1.to_bits() != ours.1.to_bits() {
+                    problem = Some(format!(
+                        "segment {i} is {} at {} but upstream has {} at {}",
+                        ours.0, ours.1, theirs.0, theirs.1
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // Then the HMM states, which is the duration model proper.
+        if problem.is_none() {
+            let ours: Vec<(String, i32, f32)> = utt
+                .iter_relation("HMMstate")
+                .map(|s| {
+                    (
+                        utt.name(s).to_string(),
+                        utt.feature_i32(s, "statepos"),
+                        utt.feature_f32(s, "end"),
+                    )
+                })
+                .collect();
+            if ours.len() != states.len() {
+                problem = Some(format!(
+                    "{} states against upstream's {}",
+                    ours.len(),
+                    states.len()
+                ));
+            } else {
+                for (i, (theirs, ours)) in states.iter().zip(&ours).enumerate() {
+                    if theirs.0 != ours.0
+                        || theirs.1 != ours.1
+                        || theirs.2.to_bits() != ours.2.to_bits()
+                    {
+                        problem = Some(format!(
+                            "state {i} is {} ({}) at {} but upstream has {} ({}) at {}",
+                            ours.0, ours.1, ours.2, theirs.0, theirs.1, theirs.2
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Then the tracks, in the order the stages run.
+        if problem.is_none() {
+            for track in &tracks {
+                let ours = match track.name.as_str() {
+                    "PARAM" => &predicted.track,
+                    "STR" => &predicted.strengths,
+                    "MLPG" => &predicted.smoothed,
+                    _ => continue,
+                };
+                if let Some(difference) = track_difference(track, ours) {
+                    problem = Some(difference);
+                    break;
+                }
+            }
+        }
+
+        if let Some(problem) = problem {
+            failures.push(format!("{sentence:?}\n    {problem}"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} sentences diverged in the clustergen trajectories:\n  {}",
+        failures.len(),
+        sentences.len(),
+        failures.join("\n  ")
+    );
+    println!(
+        "{} sentences of clustergen trajectories, all bit-identical",
+        sentences.len()
+    );
+}
+
+/// The whole corpus as one Clustergen run.
+///
+/// This is the test that pins the excitation's continuity across sentences.
+/// Upstream's pseudo-random source is process-global, so the hundredth
+/// sentence of one run does not sound like the hundredth sentence spoken
+/// alone; synthesising the corpus one sentence per process, as the test above
+/// does, cannot see that. Here a single run covers every sentence, so a
+/// backend that restarted its excitation per utterance would diverge in the
+/// second sentence and stay wrong for the rest of the corpus.
+#[cfg(feature = "clustergen")]
+#[test]
+fn reading_a_file_in_chunks_matches_upstream_on_clustergen() {
+    let mut engine = flite_rs::Engine::new();
+    assert!(engine.select_voice("slt"), "slt is not registered");
+    compare_whole_corpus_file(&engine, &["voice=slt"], "clustergen");
 }

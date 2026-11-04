@@ -358,13 +358,17 @@ impl Engine {
         F: FnMut(&[i16]) -> Flow,
     {
         let current = self.current();
+        // One run for the whole call, so that a backend carrying state between
+        // sentences — Clustergen's excitation does — behaves as it would for
+        // one continuous piece of speech rather than restarting per sentence.
+        let mut speaking = current.backend.start();
         let mut stopped = false;
         for sentence in text::sentences(text) {
             if stopped {
                 return;
             }
-            let utt = pipeline::analyse(&current.language, &sentence, &current.params);
-            current.backend.synthesise_streaming(&utt, &current.params, &mut |period| {
+            let mut utt = pipeline::analyse(&current.language, &sentence, &current.params);
+            speaking.speak(&mut utt, &current.params, &mut |period| {
                 let flow = sink(period);
                 stopped = flow == Flow::Stop;
                 flow
@@ -383,10 +387,13 @@ impl Engine {
         F: FnMut(&[i16]) -> Flow,
     {
         let current = self.current();
+        // As above: one run for the whole reader, however many sentences it
+        // turns out to hold.
+        let mut speaking = current.backend.start();
         let mut speak = |sentence: &[text::Token]| {
-            let utt = pipeline::analyse(&current.language, sentence, &current.params);
+            let mut utt = pipeline::analyse(&current.language, sentence, &current.params);
             let mut flow = Flow::Continue;
-            current.backend.synthesise_streaming(&utt, &current.params, &mut |period| {
+            speaking.speak(&mut utt, &current.params, &mut |period| {
                 flow = sink(period);
                 flow
             });
@@ -438,9 +445,10 @@ impl Engine {
         // like, so the tokens are not split.
         let tokens: Vec<text::Token> = text::tokenize(phones).into_iter().flatten().collect();
         let current = self.current();
-        let utt = pipeline::analyse_phones(&current.language, &tokens, &current.params);
-        current.backend
-            .synthesise_streaming(&utt, &current.params, &mut sink);
+        let mut utt = pipeline::analyse_phones(&current.language, &tokens, &current.params);
+        current
+            .backend
+            .synthesise_streaming(&mut utt, &current.params, &mut sink);
     }
 
     /// Run the phone-string pipeline and return the utterance, for inspection.

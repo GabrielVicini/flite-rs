@@ -28,8 +28,15 @@ import sys
 
 MAGIC = b"FLRSDAT\x01"
 
-# The diphone voices converted. Both speak US English, so they share en_us.dat.
-VOICES = ["cmu_us_kal", "cmu_us_kal16"]
+# The voices converted, and which synthesiser each asks for. All speak US
+# English, so they share en_us.dat. The backend is written into the voice file
+# as a `voice.backend` section, which is what the loader dispatches on: no part
+# of flite-rs maps a voice name to a technique.
+VOICES = [
+    ("cmu_us_kal", "diphone"),
+    ("cmu_us_kal16", "diphone"),
+    ("cmu_us_slt", "clustergen"),
+]
 
 
 class Container:
@@ -256,20 +263,39 @@ OPS = {
 
 
 def convert_cart(src_c: str, src_h: str, symbol: str) -> bytes:
-    header = read(src_h)
+    values, consts = cart_tables(read(src_h))
+    return cart_payload(read(src_c), symbol, values, consts)
+
+
+def cart_tables(header_text: str) -> tuple[dict, dict]:
+    """The constant values and node addresses a tree file's header defines.
+
+    Split out so that a Clustergen voice, which holds 124 trees in one file
+    behind one megabyte-sized header, pays for this once rather than 124 times.
+    """
     consts: dict[str, int] = {}
-    for m in re.finditer(r"#define\s+(CTNODE\w+)\s+(\d+)", header):
+    for m in re.finditer(r"#define\s+(CTNODE\w+)\s+(\d+)", header_text):
         consts[m.group(1)] = int(m.group(2))
 
     values: dict[str, tuple[int, object]] = {}
-    for m in re.finditer(r'DEF_STATIC_CONST_VAL_STRING\(\s*(\w+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)', header):
+    for m in re.finditer(
+        r'DEF_STATIC_CONST_VAL_STRING\(\s*(\w+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)',
+        header_text,
+    ):
         values[m.group(1)] = (0, unescape_c_string(m.group(2)).decode("latin-1"))
-    for m in re.finditer(r"DEF_STATIC_CONST_VAL_FLOAT\(\s*(\w+)\s*,\s*(-?[\d.eE+]+)\s*\)", header):
+    for m in re.finditer(
+        r"DEF_STATIC_CONST_VAL_FLOAT\(\s*(\w+)\s*,\s*(-?[\d.eE+]+)\s*\)", header_text
+    ):
         values[m.group(1)] = (1, float(m.group(2)))
-    for m in re.finditer(r"DEF_STATIC_CONST_VAL_INT\(\s*(\w+)\s*,\s*(-?\d+)\s*\)", header):
+    for m in re.finditer(
+        r"DEF_STATIC_CONST_VAL_INT\(\s*(\w+)\s*,\s*(-?\d+)\s*\)", header_text
+    ):
         values[m.group(1)] = (1, float(m.group(2)))
+    return values, consts
 
-    text = read(src_c)
+
+def cart_payload(text: str, symbol: str, values: dict, consts: dict) -> bytes:
+    """One tree, given the value and node tables its header defined."""
     # Upstream names the node table `<sym>_cart_nodes` but the feature table
     # `<sym>_feat_table`, i.e. without the `_cart` infix.
     feats = string_list(text, symbol.removesuffix("_cart") + "_feat_table")
@@ -417,6 +443,7 @@ def convert_voice(src: str, out: Container, voice: str) -> None:
         f"{', folds ah to aa' if fix_ah else ''}"
     )
 
+    out.add("voice.backend", b"diphone")
     entries = []
     body = strip_comments(array_body(dip, f"{voice}_index"))
     for m in re.finditer(r'\{\s*"([^"]*)"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}', body):
@@ -512,6 +539,301 @@ def dump_rust_tables(src: str) -> None:
         print(f'    ("{m.group(1)}", {m.group(2)}, {m.group(3)}, {m.group(4)}, {typ}),')
 
 
+# ---------------------------------------------------------------------------
+# Clustergen voices.
+#
+# Upstream ships three of these in-tree (lang/cmu_us_{awb,rms,slt}) as
+# generated C arrays, exactly like the diphone data, so they convert the same
+# way and need no external .flitevox file.  docs/clustergen-voice-data.md
+# records that decision and where the data comes from.
+# ---------------------------------------------------------------------------
+
+# Values of cst_cg_db.model_shape, from include/cst_cg.h.  Only the first is
+# implemented: it is what all three in-tree voices use, and the quantised
+# shapes would need their q-tables carried too.
+CG_SHAPE_BASE_MINRANGE = 1
+CG_SHAPE_QUANTIZED_PARAMS = 2
+CG_SHAPE_QUANTIZED_PARAMS_41 = 3
+
+CG_SHAPES = {
+    "CST_CG_MODEL_SHAPE_BASE_MINRANGE": CG_SHAPE_BASE_MINRANGE,
+    "CST_CG_MODEL_SHAPE_QUANTIZED_PARAMS": CG_SHAPE_QUANTIZED_PARAMS,
+    "CST_CG_MODEL_SHAPE_QUANTIZED_PARAMS_41": CG_SHAPE_QUANTIZED_PARAMS_41,
+}
+
+
+def float_array(text: str, name: str) -> list[float]:
+    body = strip_comments(array_body(text, name))
+    return [float(tok) for tok in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", body)]
+
+
+def tree_list(symbols: list[str], text: str, values: dict, consts: dict) -> bytes:
+    """A run of CART trees as one section: count, then each length-prefixed."""
+    out = bytearray(struct.pack("<I", len(symbols)))
+    for symbol in symbols:
+        payload = cart_payload(text, symbol, values, consts)
+        out += struct.pack("<I", len(payload))
+        out += payload
+    return bytes(out)
+
+
+def cg_phone_states(path: str) -> bytes:
+    """The phone-to-HMM-state map: `{"aa", "aa_1", "aa_2", "aa_3", 0}` each.
+
+    The first string is the phone and the rest are its state names, which is
+    the layout cst_cg.c walks when it builds the HMMstate relation.
+    """
+    text = strip_comments(read(path))
+    entries = []
+    for m in re.finditer(r"_ps\[\]\s*=\s*\{(.*?)\}", text, re.S):
+        names = [g.group(1) for g in STRING_LITERAL.finditer(m.group(1))]
+        if names:
+            entries.append(names)
+    out = bytearray(struct.pack("<I", len(entries)))
+    for names in entries:
+        assert len(names) < 256, names
+        out.append(len(names))
+        for name in names:
+            raw = name.encode("utf-8")
+            assert len(raw) < 256, name
+            out.append(len(raw))
+            out += raw
+    return bytes(out)
+
+
+def cg_dur_stats(path: str) -> bytes:
+    """Per-state duration mean and stddev, in the order the table lists them.
+
+    Order matters: cg_state_duration scans this table linearly and falls back
+    to entry 0 for a name it does not find, so entry 0 has to stay entry 0.
+    """
+    text = read(path)
+    literals = {
+        m.group(1): (m.group(2), float(m.group(3)), float(m.group(4)))
+        for m in re.finditer(
+            r'static const dur_stat\s+(\w+)\s*=\s*\{\s*"([^"]*)"\s*,\s*([\d.eE+-]+)\s*,'
+            r"\s*([\d.eE+-]+)\s*\}",
+            text,
+        )
+    }
+    order = re.findall(r"&(\w+)", array_body(text, "dur_stats"))
+    out = bytearray(struct.pack("<I", len(order)))
+    for name in order:
+        phone, mean, stddev = literals[name]
+        raw = phone.encode("utf-8")
+        assert len(raw) < 256, phone
+        out.append(len(raw))
+        out += raw
+        out += struct.pack("<ff", mean, stddev)
+    return bytes(out)
+
+
+def cg_model_vectors(path: str, num_frames: int, num_channels: int) -> bytes:
+    """The parameter store: one unsigned-short vector per cluster frame.
+
+    Read in one pass rather than one regex per frame, because this file is
+    eight megabytes of C.
+    """
+    text = read(path)
+    frames: dict[int, list[int]] = {}
+    for m in re.finditer(r"param_frame_(\d+)\[\]\s*=\s*\{([^}]*)\}", text):
+        frames[int(m.group(1))] = [int(t) for t in re.findall(r"\d+", m.group(2))]
+    # The model_vectors array fixes the order; it happens to be frame_0 upward,
+    # but reading it rather than assuming that is cheap.
+    order = [int(m) for m in re.findall(r"param_frame_(\d+)", array_body(text, "model_vectors"))]
+    if len(order) != num_frames:
+        sys.exit(f"{path}: {len(order)} frames, header says {num_frames}")
+    out = bytearray()
+    for index in order:
+        vector = frames[index]
+        if len(vector) != num_channels:
+            sys.exit(f"{path}: frame {index} has {len(vector)} channels, not {num_channels}")
+        out += struct.pack(f"<{num_channels}H", *vector)
+    return bytes(out)
+
+
+def cg_define(text: str, name: str) -> int:
+    m = re.search(rf"#define\s+{re.escape(name)}\s+(\d+)", text)
+    if m is None:
+        raise KeyError(name)
+    return int(m.group(1))
+
+
+def cg_int(text: str, field: str) -> int:
+    """A struct field that is either a literal or the name of a #define."""
+    field = field.strip()
+    return int(field) if field.lstrip("-").isdigit() else cg_define(text, field)
+
+
+def cg_db_fields(text: str, voice: str) -> list[str]:
+    """The initialiser of the cst_cg_db struct, one field per element.
+
+    Positional, because that is how the struct is written: upstream's own
+    comment on cst_cg_db says only to append to it, so the order is stable.
+    """
+    body = array_body_braced(text, rf"const cst_cg_db\s+{voice}_cg_db\s*=\s*\{{")
+    return [f.strip() for f in split_top_level(strip_comments(body))]
+
+
+def array_body_braced(text: str, pattern: str) -> str:
+    """`array_body` for a declaration matched by a regex rather than a name."""
+    m = re.search(pattern, text)
+    if m is None:
+        raise KeyError(pattern)
+    start = m.end()
+    depth = 1
+    i = start
+    while depth:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    return text[start : i - 1]
+
+
+def split_top_level(body: str) -> list[str]:
+    """Split on commas that are not inside brackets, quotes or braces."""
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for c in body:
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if c == "," and depth == 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += c
+    if current.strip():
+        parts.append(current)
+    return parts
+
+
+def convert_clustergen_voice(src: str, out: Container, voice: str) -> None:
+    voxdir = os.path.join(src, "lang", voice)
+    db = read(os.path.join(voxdir, f"{voice}_cg.c"))
+    fields = cg_db_fields(db, voice)
+
+    # Field positions in cst_cg_db, from include/cst_cg.h.  Named rather than
+    # indexed inline so that a struct change shows up here as one edit.
+    (
+        _name, _types, _num_types, f_sample_rate, f_f0_mean, f_f0_stddev,
+        _num_f0_models, _f0_trees, _num_param_models, _param_trees,
+        _spam_accent_tree, _spam_phrase_tree, _num_channels, _num_frames,
+        _model_vectors, _spam_num_channels, _spam_num_frames, _spam_vectors,
+        _model_min, _model_range, _qtable, f_model_shape, f_frame_advance,
+        _num_dur_models, _dur_stats, _dur_cart, _phone_states, f_do_mlpg,
+        _dynwin, f_dynwinsize, f_mlsa_alpha, f_mlsa_beta, f_multimodel,
+        f_mixed_excitation, f_me_num, f_me_order, _me_h, f_spamf0, f_gain,
+    ) = fields[:39]
+
+    shape = CG_SHAPES[f_model_shape.strip()]
+    if shape != CG_SHAPE_BASE_MINRANGE:
+        sys.exit(
+            f"{voice}: model_shape {f_model_shape.strip()} is quantised and its "
+            "q-tables are not converted"
+        )
+    if cg_int(db, f_multimodel):
+        sys.exit(f"{voice}: multimodel voices are not converted")
+    if any(
+        cg_int(db, f) != 1 for f in (_num_param_models, _num_f0_models, _num_dur_models)
+    ):
+        sys.exit(f"{voice}: only single-model voices are converted")
+    if cg_int(db, f_spamf0):
+        sys.exit(f"{voice}: the SPAM F0 model is not implemented")
+
+    types = string_list(db, f"{voice}_types")
+    num_channels = cg_define(db, f"{voice}_single_num_channels")
+    num_frames = cg_define(db, f"{voice}_single_num_frames")
+    model_min = float_array(db, f"{voice}_model_min")
+    model_range = float_array(db, f"{voice}_model_range")
+    dynwin = float_array(db, f"{voice}_dynwin")
+    dynwinsize = cg_int(db, f_dynwinsize)
+    me_num, me_order = cg_int(db, f_me_num), cg_int(db, f_me_order)
+    me_filters = [float_array(db, f"{voice}_me_filter_{i}") for i in range(me_num)]
+
+    for name, got, want in (
+        ("model_min", len(model_min), num_channels),
+        ("model_range", len(model_range), num_channels),
+        ("dynwin", len(dynwin), dynwinsize),
+    ):
+        if got != want:
+            sys.exit(f"{voice}: {name} has {got} entries, expected {want}")
+    for i, f in enumerate(me_filters):
+        if len(f) != me_order:
+            sys.exit(f"{voice}: me_filter_{i} has {len(f)} taps, expected {me_order}")
+
+    print(
+        f"  {voice}: clustergen, {num_frames} frames x {num_channels} ch @ "
+        f"{cg_int(db, f_sample_rate)} Hz, {len(types)} state types"
+        f"{', mixed excitation' if cg_int(db, f_mixed_excitation) else ''}"
+        f"{', mlpg' if cg_int(db, f_do_mlpg) else ''}"
+    )
+
+    out.add("voice.backend", b"clustergen")
+    out.add(
+        "cg.header",
+        struct.pack(
+            "<IffffffIIIIIIIIII",
+            cg_int(db, f_sample_rate),
+            float(f_f0_mean),
+            float(f_f0_stddev),
+            float(f_frame_advance),
+            float(f_mlsa_alpha),
+            float(f_mlsa_beta),
+            float(f_gain),
+            len(types),
+            num_channels,
+            num_frames,
+            shape,
+            cg_int(db, f_do_mlpg),
+            cg_int(db, f_mixed_excitation),
+            me_num,
+            me_order,
+            dynwinsize,
+            cg_int(db, f_spamf0),
+        ),
+    )
+    out.add("cg.types", string_table(types))
+    out.add("cg.modelmin", struct.pack(f"<{num_channels}f", *model_min))
+    out.add("cg.modelrange", struct.pack(f"<{num_channels}f", *model_range))
+    out.add("cg.dynwin", struct.pack(f"<{dynwinsize}f", *dynwin))
+    # The mixed-excitation filters are doubles upstream and are used as
+    # doubles, so they are not narrowed on the way through.
+    out.add(
+        "cg.mefilters",
+        b"".join(struct.pack(f"<{me_order}d", *f) for f in me_filters),
+    )
+    out.add(
+        "cg.params",
+        cg_model_vectors(
+            os.path.join(voxdir, f"{voice}_cg_single_params.c"), num_frames, num_channels
+        ),
+    )
+    out.add(
+        "cg.phonestates", cg_phone_states(os.path.join(voxdir, f"{voice}_cg_phonestate.c"))
+    )
+    out.add("cg.durstats", cg_dur_stats(os.path.join(voxdir, f"{voice}_cg_durmodel.c")))
+
+    dur_c = os.path.join(voxdir, f"{voice}_cg_durmodel.c")
+    dur_h = os.path.join(voxdir, f"{voice}_cg_durmodel.h")
+    out.add("cg.durtree", convert_cart(dur_c, dur_h, f"{voice}_dur_cart"))
+
+    # One tree per state type, in the order `cg.types` lists them: that
+    # parallelism is what lets the backend index trees by type.
+    for section, stem, prefix in (
+        ("cg.f0trees", "cg_f0_trees", f"{voice}_f0_"),
+        ("cg.mceptrees", "cg_single_mcep_trees", f"{voice}_single_mcep_"),
+    ):
+        text = read(os.path.join(voxdir, f"{voice}_{stem}.c"))
+        values, consts = cart_tables(read(os.path.join(voxdir, f"{voice}_{stem}.h")))
+        symbols = [f"{prefix}{t}_cart" for t in types]
+        out.add(section, tree_list(symbols, text, values, consts))
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -532,10 +854,13 @@ def main() -> int:
     convert_aswd(src, lang)
     lang.write(os.path.join(outdir, "en_us.dat"))
 
-    for name in VOICES:
+    for name, backend in VOICES:
         print("voice data:")
         voice = Container()
-        convert_voice(src, voice, name)
+        if backend == "clustergen":
+            convert_clustergen_voice(src, voice, name)
+        else:
+            convert_voice(src, voice, name)
         voice.write(os.path.join(outdir, f"{name}.dat"))
     return 0
 

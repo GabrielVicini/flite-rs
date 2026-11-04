@@ -177,16 +177,11 @@ impl DiphoneVoice {
 
     #[inline]
     fn residual_sizes(&self) -> Option<&[u8]> {
-        self.residual_sizes
-            .as_ref()
-            .map(|r| &self.data[r.clone()])
+        self.residual_sizes.as_ref().map(|r| &self.data[r.clone()])
     }
 
     fn find(&self, name: &str) -> Option<&Diphone> {
-        let i = self
-            .index
-            .binary_search_by(|d| (*d.name).cmp(name))
-            .ok()?;
+        let i = self.index.binary_search_by(|d| (*d.name).cmp(name)).ok()?;
         Some(&self.index[i])
     }
 
@@ -226,13 +221,28 @@ impl Backend for DiphoneVoice {
         self.profile
     }
 
-    fn synthesise_streaming(
-        &self,
-        utt: &Utterance,
+    fn start(&self) -> Box<dyn crate::voice::Speaking + '_> {
+        Box::new(SpeakingDiphone(self))
+    }
+}
+
+/// A diphone run, which carries nothing.
+///
+/// Every utterance is independent: the output depends on the recorded units
+/// and the predicted prosody and on nothing that happened before. The run
+/// exists only because a statistical backend needs one.
+struct SpeakingDiphone<'a>(&'a DiphoneVoice);
+
+impl crate::voice::Speaking for SpeakingDiphone<'_> {
+    fn speak(
+        &mut self,
+        utt: &mut Utterance,
         params: &VoiceParams,
         sink: &mut dyn FnMut(&[i16]) -> Flow,
     ) {
-        synthesise_streaming(self, utt, params, sink)
+        // Diphone synthesis only reads the utterance; the trait takes it by
+        // `&mut` because a statistical backend has to annotate it.
+        synthesise_streaming(self.0, utt, params, sink)
     }
 }
 
@@ -247,7 +257,7 @@ struct Unit {
 /// Generate the waveform for a fully analysed utterance.
 pub fn synthesise(
     voice: &DiphoneVoice,
-    utt: &Utterance,
+    utt: &mut Utterance,
     params: &VoiceParams,
 ) -> crate::voice::Audio {
     Backend::synthesise(voice, utt, params)

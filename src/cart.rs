@@ -75,6 +75,15 @@ impl Cart {
         })
     }
 
+    /// Every feature path this tree can ask about.
+    ///
+    /// A tree that disagrees with upstream disagrees because one of these
+    /// answers differently, so being able to enumerate them is what turns
+    /// "the audio is wrong" into "this feature is wrong".
+    pub fn feature_paths(&self) -> impl Iterator<Item = &str> {
+        self.features.iter().map(FeaturePath::as_str)
+    }
+
     /// Classify `item`, returning the leaf value.
     pub fn interpret(&self, utt: &Utterance, item: ItemId) -> &Value {
         // Small vector of (feature index, value): trees are shallow enough

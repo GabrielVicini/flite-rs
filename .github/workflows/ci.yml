@@ -25,7 +25,7 @@ jobs:
     name: Format, clippy and docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -63,7 +63,7 @@ jobs:
         # configurations anyone actually depends on.
         features: ["--all-features", "--no-default-features"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -83,7 +83,7 @@ jobs:
     name: Overflow checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test with overflow checks
@@ -102,7 +102,7 @@ jobs:
       # arms, a lint that has since been resolved in the other direction.
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.70"
@@ -136,7 +136,7 @@ jobs:
       # floating ref would turn that into a mystery failure on an unrelated PR.
       FLITE_REV: 6c9f20dc915b17f5619340069889db0aa007fcdc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -151,7 +151,7 @@ jobs:
       # Keyed on the upstream revision and on the build script, since the
       # source list and the compile flags live there.
       - name: Cache the reference build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tools/reference/build
           key: flite-ref-${{ runner.os }}-${{ env.FLITE_REV }}-${{ hashFiles('tools/reference/build.py', 'tools/reference/*.c') }}
@@ -184,7 +184,7 @@ jobs:
     name: Package for crates.io
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -212,7 +212,7 @@ jobs:
       - name: List what would be published
         run: cargo package --locked --all-features --list
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: crate
           path: target/package/*.crate

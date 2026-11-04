@@ -94,6 +94,13 @@ jobs:
   msrv:
     name: MSRV 1.70
     runs-on: ubuntu-latest
+    env:
+      # This job asks one question: does the library still compile on 1.70?
+      # The repo-wide -D warnings is dropped here, because a 1.70 lint is not
+      # a quality signal for code that current Rust accepts. It fires
+      # illegal-floating-point-literal-pattern on float literals in match
+      # arms, a lint that has since been resolved in the other direction.
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

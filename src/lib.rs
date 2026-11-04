@@ -36,7 +36,7 @@
 //!
 //! Synthesis runs in two halves. The [linguistic pipeline](pipeline) turns
 //! text into a sequence of phones with durations and a pitch contour; the
-//! [voice](voice) turns that into a waveform by splicing together recorded
+//! [voice] turns that into a waveform by splicing together recorded
 //! diphones and resynthesising them at the requested pitch. The intermediate
 //! structure is a heterogeneous relation graph ([`utterance::Utterance`]),
 //! which every model queries through [feature paths](ffeature).

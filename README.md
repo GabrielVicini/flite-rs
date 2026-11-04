@@ -1,5 +1,9 @@
 # flite-rs
 
+[![CI](https://github.com/GabrielVicini/flite-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/GabrielVicini/flite-rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/flite-rs.svg)](https://crates.io/crates/flite-rs)
+[![docs.rs](https://docs.rs/flite-rs/badge.svg)](https://docs.rs/flite-rs)
+
 Text-to-speech in pure Rust. Small, fast, and dependency-free.
 
 A clean-room implementation of the diphone concatenative synthesis used by CMU's

@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # clap is the only dependency, and only behind the `cli` feature, so monthly
+  # is plenty. Grouped so a bump arrives as one PR rather than one per crate.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

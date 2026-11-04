@@ -1,0 +1,204 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep the cache small: nothing here needs incremental artefacts.
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Format, clippy and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # Every combination, because the features gate real code: `cli` pulls in
+      # clap and the binary, `kal16` adds a second voice and the uncompressed
+      # mu-law residual path. A lint clean under `--all-features` says nothing
+      # about the zero-dependency build.
+      - name: Clippy (no features)
+        run: cargo clippy --locked --all-targets --no-default-features
+      - name: Clippy (cli)
+        run: cargo clippy --locked --all-targets --no-default-features --features cli
+      - name: Clippy (kal16)
+        run: cargo clippy --locked --all-targets --no-default-features --features kal16
+      - name: Clippy (all features)
+        run: cargo clippy --locked --all-targets --all-features
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --all-features
+
+  test:
+    name: Test ${{ matrix.os }} ${{ matrix.features }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The dependency-free build and the everything build are the two
+        # configurations anyone actually depends on.
+        features: ["--all-features", "--no-default-features"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Release, because synthesising the test corpus in a debug build is slow
+      # enough to dominate the run. The overflow job below covers what -O hides.
+      - name: Test
+        run: cargo test --locked --release ${{ matrix.features }}
+
+      - name: Example
+        if: matrix.features == '--all-features'
+        run: cargo run --locked --release --all-features --example analysis -- "The quick brown fox."
+
+  # The synthesiser is wall-to-wall arithmetic on model output. Release builds
+  # wrap silently; this one panics instead, which is the only way an overflow
+  # in the LPC or pitch-mark paths gets noticed.
+  overflow:
+    name: Overflow checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test with overflow checks
+        env:
+          RUSTFLAGS: -D warnings -C debug-assertions=yes -C overflow-checks=yes
+        run: cargo test --locked --release --all-features
+
+  msrv:
+    name: MSRV 1.70
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.70"
+      - uses: Swatinem/rust-cache@v2
+
+      # Only the dependency-free configuration. rust-version promises what the
+      # library needs; clap's own MSRV moves independently and above this, so
+      # checking the `cli` feature here would fail on someone else's policy
+      # rather than on anything this crate did.
+      - name: Check library
+        run: cargo check --locked --no-default-features --lib
+      - name: Check library (kal16)
+        run: cargo check --locked --no-default-features --features kal16 --lib
+
+  # The reason this crate exists is that its output is identical to upstream
+  # Flite, not merely similar. Nothing else in CI can tell you that.
+  reference:
+    name: Bit-exactness against upstream Flite
+    runs-on: ubuntu-latest
+    env:
+      # Upstream has no 2.3 tag, so this is pinned by commit. Bumping it is a
+      # deliberate act: upstream changing its output is a finding, and a
+      # floating ref would turn that into a mystery failure on an unrelated PR.
+      FLITE_REV: 6c9f20dc915b17f5619340069889db0aa007fcdc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check out upstream Flite
+        run: |
+          git init --quiet upstream-flite
+          cd upstream-flite
+          git remote add origin https://github.com/festvox/flite.git
+          git fetch --quiet --depth 1 origin "$FLITE_REV"
+          git checkout --quiet FETCH_HEAD
+
+      # Keyed on the upstream revision and on the build script, since the
+      # source list and the compile flags live there.
+      - name: Cache the reference build
+        uses: actions/cache@v4
+        with:
+          path: tools/reference/build
+          key: flite-ref-${{ runner.os }}-${{ env.FLITE_REV }}-${{ hashFiles('tools/reference/build.py', 'tools/reference/*.c') }}
+
+      - name: Build the reference binaries
+        run: python3 tools/reference/build.py --flite-src upstream-flite
+
+      # tests/reference.rs passes when the reference binary is absent, so that
+      # a plain checkout runs green. That is right for a checkout and wrong
+      # here: without this guard a broken reference build would leave the job
+      # green while comparing nothing at all.
+      - name: Confirm the reference was actually built
+        run: |
+          for binary in reffile refdump refphones; do
+            path="tools/reference/build/$binary"
+            if [ ! -x "$path" ]; then
+              echo "::error::$path is missing; the comparison would silently skip"
+              exit 1
+            fi
+          done
+          ls -l tools/reference/build
+
+      - name: Compare sample-for-sample (kal, 8 kHz)
+        run: cargo test --locked --release --test reference -- --nocapture
+
+      - name: Compare sample-for-sample (kal16, 16 kHz)
+        run: cargo test --locked --release --features kal16 --test reference -- --nocapture
+
+  package:
+    name: Package for crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package
+        run: cargo package --locked --all-features
+
+      # The voice data is embedded, so the packaged crate is mostly binary
+      # models and sits much closer to the registry's 10 MiB ceiling than a
+      # normal crate. Adding a voice should fail here, loudly, rather than at
+      # publish time.
+      - name: Check the packaged size
+        run: |
+          crate=$(ls target/package/*.crate)
+          bytes=$(stat -c%s "$crate")
+          limit=$((10 * 1024 * 1024))
+          echo "$(basename "$crate") is $bytes bytes, $((bytes * 100 / limit))% of the 10 MiB crates.io limit"
+          if [ "$bytes" -ge "$limit" ]; then
+            echo "::error::the packaged crate exceeds the crates.io limit"
+            exit 1
+          fi
+          if [ "$bytes" -ge $((limit * 80 / 100)) ]; then
+            echo "::warning::the packaged crate is within 20% of the crates.io limit"
+          fi
+
+      - name: List what would be published
+        run: cargo package --locked --all-features --list
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crate
+          path: target/package/*.crate
+          retention-days: 14

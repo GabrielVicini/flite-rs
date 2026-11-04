@@ -19,6 +19,7 @@
 //! this format's documentation.
 
 use std::fmt;
+use std::ops::Range;
 
 const MAGIC: &[u8; 8] = b"FLRSDAT\x01";
 
@@ -38,8 +39,13 @@ impl std::error::Error for DataError {}
 type Result<T> = std::result::Result<T, DataError>;
 
 /// The named sections of one container, borrowed from the embedded bytes.
+///
+/// Sections are recorded as byte ranges into the whole file as well as
+/// slices, because a voice that *owns* its bytes cannot also hold slices into
+/// them: it stores the ranges and resolves them on access. See [`VoiceData`].
 pub struct Container<'a> {
-    sections: Vec<(&'a str, &'a [u8])>,
+    bytes: &'a [u8],
+    sections: Vec<(&'a str, Range<usize>)>,
 }
 
 impl<'a> Container<'a> {
@@ -53,9 +59,13 @@ impl<'a> Container<'a> {
             let name_len = r.u8()? as usize;
             let name = r.str(name_len)?;
             let len = r.u32()? as usize;
-            sections.push((name, r.bytes(len)?));
+            // Offsets are relative to the start of the file, not to the
+            // post-magic cursor, so a range indexes the original bytes.
+            let start = MAGIC.len() + r.position();
+            r.bytes(len)?;
+            sections.push((name, start..start + len));
         }
-        Ok(Container { sections })
+        Ok(Container { bytes, sections })
     }
 
     pub fn section(&self, name: &str) -> Result<&'a [u8]> {
@@ -66,10 +76,25 @@ impl<'a> Container<'a> {
     /// A section that a file may legitimately not carry, such as the decoded
     /// residual lengths of a voice whose residual is not compressed.
     pub fn optional_section(&self, name: &str) -> Option<&'a [u8]> {
+        self.optional_range(name).map(|r| &self.bytes[r])
+    }
+
+    /// Where a section sits in the file, for a voice that owns its bytes.
+    pub fn range(&self, name: &str) -> Result<Range<usize>> {
+        self.optional_range(name)
+            .ok_or(DataError("missing section"))
+    }
+
+    pub fn optional_range(&self, name: &str) -> Option<Range<usize>> {
         self.sections
             .iter()
             .find(|(n, _)| *n == name)
-            .map(|(_, b)| *b)
+            .map(|(_, r)| r.clone())
+    }
+
+    /// Every section name in the file, in the order they appear.
+    pub fn section_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.sections.iter().map(|(n, _)| *n)
     }
 }
 
@@ -86,6 +111,11 @@ impl<'a> Reader<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.pos >= self.bytes.len()
+    }
+
+    /// Bytes consumed so far.
+    pub fn position(&self) -> usize {
+        self.pos
     }
 
     pub fn bytes(&mut self, len: usize) -> Result<&'a [u8]> {
@@ -149,4 +179,101 @@ pub fn u16_at(bytes: &[u8], i: usize) -> u16 {
 pub fn u32_at(bytes: &[u8], i: usize) -> u32 {
     let o = i * 4;
     u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+}
+
+/// Where a voice's bytes live.
+///
+/// The bundled voices are `include_bytes!`'d and so are `'static`; a voice read
+/// at runtime is not. Both backends hold their tables as this, which is why
+/// neither had to be touched when the second one arrived: a `&'static [u8]`
+/// field structurally forbids runtime loading, and a bare `Arc<[u8]>` would
+/// copy several megabytes of embedded voice at every startup to buy a
+/// flexibility the embedded case never uses.
+///
+/// [`Deref`] makes the distinction invisible at every use site, so parsing code
+/// reads a slice and does not care which case it has.
+#[derive(Clone, Debug)]
+pub enum VoiceData {
+    /// Embedded in the binary. No allocation, no copy.
+    Static(&'static [u8]),
+    /// Loaded at runtime and shared between clones.
+    Shared(std::sync::Arc<[u8]>),
+}
+
+impl VoiceData {
+    /// Take ownership of bytes read at runtime.
+    pub fn owned(bytes: impl Into<std::sync::Arc<[u8]>>) -> VoiceData {
+        VoiceData::Shared(bytes.into())
+    }
+}
+
+impl From<&'static [u8]> for VoiceData {
+    fn from(bytes: &'static [u8]) -> VoiceData {
+        VoiceData::Static(bytes)
+    }
+}
+
+impl From<Vec<u8>> for VoiceData {
+    fn from(bytes: Vec<u8>) -> VoiceData {
+        VoiceData::Shared(bytes.into())
+    }
+}
+
+impl std::ops::Deref for VoiceData {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            VoiceData::Static(bytes) => bytes,
+            VoiceData::Shared(bytes) => bytes,
+        }
+    }
+}
+
+/// Which synthesiser a voice file asks for.
+///
+/// This is read from the container's `voice.backend` section rather than
+/// decided by the voice's name, so adding a backend does not mean adding a
+/// name to a list in `src/`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendKind {
+    /// Diphone concatenation: [`crate::voice::DiphoneVoice`].
+    Diphone,
+    /// Clustergen statistical parametric synthesis.
+    Clustergen,
+}
+
+impl BackendKind {
+    /// The name as it appears in the container.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendKind::Diphone => "diphone",
+            BackendKind::Clustergen => "clustergen",
+        }
+    }
+
+    pub fn parse(name: &str) -> Result<BackendKind> {
+        match name {
+            "diphone" => Ok(BackendKind::Diphone),
+            "clustergen" => Ok(BackendKind::Clustergen),
+            _ => Err(DataError("voice asks for an unknown synthesis backend")),
+        }
+    }
+}
+
+impl<'a> Container<'a> {
+    /// The backend this voice file asks for.
+    ///
+    /// A file written before the section existed names no backend and is a
+    /// diphone voice, which is what every voice was at the time.
+    pub fn backend(&self) -> Result<BackendKind> {
+        match self.optional_section("voice.backend") {
+            None => Ok(BackendKind::Diphone),
+            Some(payload) => {
+                let name = std::str::from_utf8(payload)
+                    .map_err(|_| DataError("backend name is not utf-8"))?;
+                BackendKind::parse(name.trim())
+            }
+        }
+    }
 }

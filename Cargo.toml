@@ -28,6 +28,11 @@ cli = ["dep:clap"]
 # in quality. Off by default because its residual is not compressed, so it adds
 # about 4 MB to the binary.
 kal16 = []
+# Clustergen: statistical parametric synthesis, and the cmu_us_slt voice that
+# uses it. Off by default because the regression trees and the parameter store
+# add several megabytes, and because a build that only wants diphone should
+# compile none of the MLSA/MLPG code. Adds no dependencies.
+clustergen = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }

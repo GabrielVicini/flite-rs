@@ -52,7 +52,10 @@
 #![forbid(unsafe_code)]
 
 pub mod cart;
+#[cfg(feature = "clustergen")]
+pub mod clustergen;
 pub mod data;
+pub mod diphone;
 pub mod dsp;
 pub mod ffeature;
 pub mod lang;
@@ -69,11 +72,20 @@ pub mod value;
 pub mod voice;
 pub mod wav;
 
+pub use data::{BackendKind, VoiceData};
+pub use diphone::DiphoneVoice;
 pub use dsp::Flow;
 pub use lexicon::LexiconError;
 pub use utterance::Utterance;
-pub use voice::{Audio, JoinType, ResynthType, Voice, VoiceParams};
+pub use voice::{Audio, Backend, JoinType, ResynthType, VoiceParams, VoiceProfile};
 pub use wav::{write_wav, WavWriter};
+
+/// The diphone backend under its old name.
+///
+/// Renamed when a second backend arrived and `Voice` stopped meaning "the
+/// voice"; kept so that code written against 0.2 still compiles.
+#[deprecated(since = "0.3.0", note = "renamed to DiphoneVoice")]
+pub type Voice = DiphoneVoice;
 
 use language::Language;
 use std::sync::Arc;
@@ -95,10 +107,24 @@ pub static KAL_VOICE_DATA: &[u8] = include_bytes!("../data/cmu_us_kal.dat");
 #[cfg(feature = "kal16")]
 pub static KAL16_VOICE_DATA: &[u8] = include_bytes!("../data/cmu_us_kal16.dat");
 
+/// The `cmu_us_slt` Clustergen voice: 16 kHz, female, American English.
+///
+/// Statistical parametric rather than concatenative, so it carries no
+/// recordings: mel-cepstral trajectories predicted from regression trees and
+/// run through an MLSA filter. Behind the `clustergen` feature because the
+/// trees and the parameter store are several megabytes and a build that only
+/// wants diphone should pay nothing for them.
+#[cfg(feature = "clustergen")]
+pub static SLT_VOICE_DATA: &[u8] = include_bytes!("../data/cmu_us_slt.dat");
+
 /// One registered voice: its data, the language it speaks, and its settings.
 struct Registered {
     name: String,
-    voice: Voice,
+    /// The synthesiser. `Arc<dyn Backend>` rather than a type parameter on
+    /// [`Engine`], because one engine holds voices of different kinds at once
+    /// and a parameter would force them to agree. This matches the
+    /// `Arc<Language>` next to it.
+    backend: Arc<dyn Backend>,
     /// Shared, because several voices of the same language use one set of
     /// models and those are the large part.
     language: Arc<Language>,
@@ -141,15 +167,15 @@ impl Engine {
         // the selected default whether or not the feature is on: a build flag
         // should add a choice, not silently change what everyone hears.
         #[cfg(feature = "kal16")]
-        {
-            let voice = Voice::parse(KAL16_VOICE_DATA)?;
-            let params = voice.params();
-            engine.register_voice("kal16", voice, Arc::clone(&language), params);
-        }
+        engine.register_voice_data("kal16", KAL16_VOICE_DATA, Arc::clone(&language))?;
+
+        // The Clustergen voice goes before the default for the same reason: a
+        // feature should add a choice, not change what everyone hears.
+        #[cfg(feature = "clustergen")]
+        engine.register_voice_data("slt", SLT_VOICE_DATA, Arc::clone(&language))?;
+
         // Upstream registers this voice under its speaker's name.
-        let voice = Voice::parse(KAL_VOICE_DATA)?;
-        let params = voice.params();
-        engine.register_voice("kal", voice, language, params);
+        engine.register_voice_data("kal", KAL_VOICE_DATA, language)?;
         Ok(engine)
     }
 
@@ -161,13 +187,13 @@ impl Engine {
     pub fn register_voice(
         &mut self,
         name: &str,
-        voice: Voice,
+        backend: Arc<dyn Backend>,
         language: Arc<Language>,
         params: VoiceParams,
     ) {
         let registered = Registered {
             name: name.to_string(),
-            voice,
+            backend,
             language,
             params,
             natural_duration_stretch: params.duration_stretch,
@@ -182,6 +208,35 @@ impl Engine {
                 self.selected = self.voices.len() - 1;
             }
         }
+    }
+
+    /// Parse a voice file and register the backend it asks for.
+    ///
+    /// Which synthesiser is used is read from the file's `voice.backend`
+    /// section, so nothing here maps a voice *name* to a technique: adding a
+    /// backend means teaching this one function to build it, and adding a
+    /// voice means shipping its data.
+    pub fn register_voice_data(
+        &mut self,
+        name: &str,
+        data: impl Into<VoiceData>,
+        language: Arc<Language>,
+    ) -> Result<(), data::DataError> {
+        let data = data.into();
+        let backend: Arc<dyn Backend> = match data::Container::parse(&data)?.backend()? {
+            BackendKind::Diphone => Arc::new(DiphoneVoice::parse(data)?),
+            #[cfg(feature = "clustergen")]
+            BackendKind::Clustergen => Arc::new(clustergen::ClustergenVoice::parse(data)?),
+            #[cfg(not(feature = "clustergen"))]
+            BackendKind::Clustergen => {
+                return Err(data::DataError(
+                    "this voice needs Clustergen; rebuild with the `clustergen` feature",
+                ))
+            }
+        };
+        let params = backend.profile().params();
+        self.register_voice(name, backend, language, params);
+        Ok(())
     }
 
     /// The names of every registered voice, in registration order.
@@ -272,7 +327,7 @@ impl Engine {
     ///
     /// Voices may differ in this, so read it again after selecting one.
     pub fn sample_rate(&self) -> u32 {
-        self.current().voice.sample_rate
+        self.current().backend.sample_rate()
     }
 
     /// Synthesise text to audio.
@@ -309,7 +364,7 @@ impl Engine {
                 return;
             }
             let utt = pipeline::analyse(&current.language, &sentence, &current.params);
-            voice::synthesise_streaming(&current.voice, &utt, &current.params, &mut |period| {
+            current.backend.synthesise_streaming(&utt, &current.params, &mut |period| {
                 let flow = sink(period);
                 stopped = flow == Flow::Stop;
                 flow
@@ -331,7 +386,7 @@ impl Engine {
         let mut speak = |sentence: &[text::Token]| {
             let utt = pipeline::analyse(&current.language, sentence, &current.params);
             let mut flow = Flow::Continue;
-            voice::synthesise_streaming(&current.voice, &utt, &current.params, &mut |period| {
+            current.backend.synthesise_streaming(&utt, &current.params, &mut |period| {
                 flow = sink(period);
                 flow
             });
@@ -384,7 +439,8 @@ impl Engine {
         let tokens: Vec<text::Token> = text::tokenize(phones).into_iter().flatten().collect();
         let current = self.current();
         let utt = pipeline::analyse_phones(&current.language, &tokens, &current.params);
-        voice::synthesise_streaming(&current.voice, &utt, &current.params, &mut sink);
+        current.backend
+            .synthesise_streaming(&utt, &current.params, &mut sink);
     }
 
     /// Run the phone-string pipeline and return the utterance, for inspection.

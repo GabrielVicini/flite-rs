@@ -35,8 +35,15 @@ pub fn analyse(lang: &Language, tokens: &[Token], params: &VoiceParams) -> Utter
     insert_pauses(&mut utt);
     apply_postlexical_rules(&mut utt, params);
     predict_intonation(lang, &mut utt);
-    predict_durations(lang, &mut utt, params.duration_stretch);
-    predict_f0(&mut utt, params);
+    // A backend that predicts its own durations and pitch asks for both of
+    // these to be skipped; upstream spells that as the voice features
+    // `no_segment_duration_model` and `no_f0_target_model`.
+    if params.segment_duration_model {
+        predict_durations(lang, &mut utt, params.duration_stretch);
+    }
+    if params.f0_target_model {
+        predict_f0(&mut utt, params);
+    }
     utt
 }
 
@@ -60,8 +67,12 @@ pub fn analyse_phones(lang: &Language, tokens: &[Token], params: &VoiceParams) -
     build_token_relation(&mut utt, tokens);
     phones_to_segments(&mut utt);
     tag_parts_of_speech(lang, &mut utt);
-    predict_durations(lang, &mut utt, params.duration_stretch);
-    predict_f0(&mut utt, params);
+    if params.segment_duration_model {
+        predict_durations(lang, &mut utt, params.duration_stretch);
+    }
+    if params.f0_target_model {
+        predict_f0(&mut utt, params);
+    }
     utt
 }
 

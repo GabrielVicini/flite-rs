@@ -359,7 +359,10 @@ fn voices_can_be_registered_and_selected_by_name() {
     params.int_f0_target_mean = 130.0;
     e.register_voice(
         "higher",
-        flite_rs::Voice::parse(flite_rs::KAL_VOICE_DATA).expect("bundled data is valid"),
+        std::sync::Arc::new(
+            flite_rs::DiphoneVoice::parse(flite_rs::KAL_VOICE_DATA)
+                .expect("bundled data is valid"),
+        ),
         e.language(),
         params,
     );
@@ -486,7 +489,10 @@ fn added_words_belong_to_the_voice_that_learned_them() {
     params.int_f0_target_mean = 120.0;
     e.register_voice(
         "second",
-        flite_rs::Voice::parse(flite_rs::KAL_VOICE_DATA).expect("bundled data is valid"),
+        std::sync::Arc::new(
+            flite_rs::DiphoneVoice::parse(flite_rs::KAL_VOICE_DATA)
+                .expect("bundled data is valid"),
+        ),
         e.language(),
         params,
     );

@@ -101,14 +101,22 @@ jobs:
           toolchain: "1.70"
       - uses: Swatinem/rust-cache@v2
 
+      # Cargo.lock is version 4, which Cargo 1.70 cannot parse at all. That is
+      # not a problem for anyone depending on this crate, since they resolve
+      # against their own lockfile, so the check drops ours rather than
+      # pinning the repo to an older lockfile format. Nothing is being
+      # resolved here anyway: the configuration below has no dependencies.
+      - name: Drop the lockfile
+        run: rm -f Cargo.lock
+
       # Only the dependency-free configuration. rust-version promises what the
       # library needs; clap's own MSRV moves independently and above this, so
       # checking the `cli` feature here would fail on someone else's policy
       # rather than on anything this crate did.
       - name: Check library
-        run: cargo check --locked --no-default-features --lib
+        run: cargo check --no-default-features --lib
       - name: Check library (kal16)
-        run: cargo check --locked --no-default-features --features kal16 --lib
+        run: cargo check --no-default-features --features kal16 --lib
 
   # The reason this crate exists is that its output is identical to upstream
   # Flite, not merely similar. Nothing else in CI can tell you that.

@@ -21,6 +21,16 @@ This writes `reffile`, `refdump` and `refphones` into `tools/reference/build`,
 which is ignored by git. Object files are cached there, so a second run is
 quick.
 
+The build compiles with `-ffp-contract=off` on `cc` and `/fp:precise` on MSVC,
+and both are load bearing. GCC defaults to `-ffp-contract=fast`, which fuses
+`a*b+c` into one FMA instruction and drops the rounding of the intermediate
+product. GCC 13 did not do that in the duration model and GCC 15 does, which
+moves one segment boundary by a microsecond, moves a pitch mark by one sample,
+and makes a few hundred samples differ before the output resynchronises. Rust
+never contracts without an explicit `fma()`, so the engine cannot follow the
+reference into FMA, and it is the reference that has to hold still. Without the
+flag, whether this test passes depends on which compiler built it.
+
   `reffile`    text file in, WAV out. Trailing `NAME=VALUE` arguments set voice
                features, and `voice=kal16` picks the 16 kHz voice, which is how
                the paths a voice does not ask for by itself get exercised.

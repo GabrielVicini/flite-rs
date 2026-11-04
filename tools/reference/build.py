@@ -170,7 +170,12 @@ def build_msvc(root, sources, objdir, outdir):
         )
 
     includes = " ".join(f'/I"{root / d}"' for d in INCLUDE_DIRS)
-    flags = f"/nologo /O2 /W0 /MP /D_CRT_SECURE_NO_WARNINGS {includes}"
+    # /fp:precise is already the default, but the reference is only a
+    # reference if its arithmetic is pinned rather than inherited. The note
+    # on -ffp-contract=off in build_cc explains what goes wrong otherwise.
+    flags = (
+        f"/nologo /O2 /W0 /MP /fp:precise /D_CRT_SECURE_NO_WARNINGS {includes}"
+    )
     commands = []
 
     # The doubled backslash is load bearing: a single one before the closing
@@ -199,7 +204,15 @@ def build_msvc(root, sources, objdir, outdir):
 def build_cc(root, sources, objdir, outdir):
     compiler = os.environ.get("CC", "cc")
     includes = [f"-I{root / d}" for d in INCLUDE_DIRS]
-    flags = ["-O2", "-w", *includes]
+    # -ffp-contract=off is load bearing. GCC's default is `fast`, which lets
+    # it fuse a*b+c into a single FMA instruction and so skip the rounding of
+    # the intermediate product. GCC 13 did not take that opportunity in the
+    # duration model and GCC 15 does, which moves a segment boundary by a
+    # microsecond, moves a pitch mark by one sample, and makes several hundred
+    # samples of the output differ. Rust never contracts without an explicit
+    # fma() call, so the engine cannot follow the reference there, and the
+    # reference is the thing that has to hold still.
+    flags = ["-O2", "-w", "-ffp-contract=off", *includes]
 
     def compile_one(source):
         obj = objdir / (source.stem + ".o")

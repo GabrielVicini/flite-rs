@@ -52,6 +52,16 @@ export class Scope {
       if (t < 1) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
+
+    // A tab the compositor has stopped drawing never runs a frame callback,
+    // and a sweep that never starts is a waveform that never appears. Drawing
+    // it whole costs the animation and keeps the picture.
+    setTimeout(() => {
+      if (this.samples === samples && this.progress === 0) {
+        this.progress = 1;
+        this.draw();
+      }
+    }, duration);
   }
 
   clear() {

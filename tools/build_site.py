@@ -83,8 +83,9 @@ def build_module(name: str, features: list[str], skip: bool) -> Path:
 def optimise(path: Path) -> Path:
     """Run wasm-opt if it happens to be installed; skip it if not.
 
-    It is worth roughly a tenth of the module, almost all of it code rather
-    than voice data, so the build does not insist on it.
+    Measured at about 1% of each module, because almost all of a module is
+    voice data and the optimiser only touches code. Worth having, not worth
+    requiring, so a build without it carries on and says so.
 
     `--all-features` rather than a list: rustc decides which wasm proposals it
     emits and that set moves with the compiler, so naming them here means the

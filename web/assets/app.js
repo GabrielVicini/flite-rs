@@ -292,6 +292,28 @@ function renderFacts(synth) {
 
 // --- speaking -------------------------------------------------------------
 
+/**
+ * Wait for a frame, but not forever.
+ *
+ * A tab the compositor has stopped drawing — occluded, backgrounded, or in a
+ * pane that is merely off screen — never runs its frame callbacks, and
+ * `visibilityState` still says `visible` through some of that. Waiting on a
+ * frame that is not coming would leave the button disabled and the click
+ * doing nothing, so the paint is an optimisation here and not a step.
+ */
+function nextPaint(timeout = 120) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    requestAnimationFrame(finish);
+    setTimeout(finish, timeout);
+  });
+}
+
 async function speak() {
   const text = $('[data-text]').value.trim();
   if (!text) {
@@ -310,7 +332,7 @@ async function speak() {
     synth.setPitch(Number($('[data-pitch]').value));
 
     // Let the busy state paint before a call that blocks the thread.
-    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    await nextPaint();
 
     const render = synth.speak(text);
     if (!render.samples.length) {

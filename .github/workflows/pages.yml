@@ -50,9 +50,9 @@ jobs:
             .
             wasm
 
-      # Worth roughly a tenth of each module, nearly all of it code rather than
-      # voice data. The build script skips it when it is missing, so this is an
-      # improvement and not a requirement.
+      # About 1% of each module: nearly all of a module is voice data, which
+      # the optimiser does not touch. The build script carries on without it,
+      # so this is an improvement and not a requirement.
       - name: Install binaryen
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends binaryen
 

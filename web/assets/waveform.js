@@ -83,6 +83,10 @@ export class Scope {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
 
+    // An empty scope is empty paper. Ruling it anyway drew a line straight
+    // through the "press Speak" message sitting on top of the canvas.
+    if (!this.samples || !this.samples.length) return;
+
     const rule = this.#token('--rule', '#ddd');
     const mid = height / 2;
 
@@ -103,8 +107,6 @@ export class Scope {
     context.moveTo(0, Math.round(mid) + 0.5);
     context.lineTo(width, Math.round(mid) + 0.5);
     context.stroke();
-
-    if (!this.samples || !this.samples.length) return;
 
     const samples = this.samples;
     const columns = Math.max(1, Math.floor(width));

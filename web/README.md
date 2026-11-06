@@ -35,11 +35,11 @@ One module is built per voice set, because a voice is almost entirely data and
 there is no reason to make a visitor download the 16 kHz diphone database to
 hear the 8 kHz one:
 
-| Module       | Features      | Voices       | Size   |
-| ------------ | ------------- | ------------ | ------ |
-| `core`       | —             | `kal`        | ~2.5 MB |
-| `kal16`      | `kal16`       | `kal16`, `kal` | ~6.3 MB |
-| `clustergen` | `clustergen`  | `slt`, `kal` | ~4.9 MB |
+| Module       | Features     | Voices         | Size    |
+| ------------ | ------------ | -------------- | ------- |
+| `core`       | —            | `kal`          | ~2.5 MB |
+| `kal16`      | `kal16`      | `kal16`, `kal` | ~6.3 MB |
+| `clustergen` | `clustergen` | `slt`, `kal`   | ~4.9 MB |
 
 The page fetches a module the first time its engine is picked and keeps it
 afterwards. `build.json` records each module's size and content hash, and the
@@ -50,41 +50,44 @@ markup.
 ## Changing what it says
 
 Everything the page renders comes from `site.config.json`: the wordmark, every
-label, the sample sentences, which panels appear, which engines are offered and
-what they are called, and the palette and typefaces. Nothing is baked into
-`index.html`.
+label, the sample sentences, which engines are offered and what they are
+called, and which of the three output panels appear. Nothing is baked into
+`index.html`, which carries structure and `data-copy` hooks and no copy.
 
-There are two ways to change it:
+Edit the file. The shape is documented by its own contents; the page deep
+merges it over a fallback, so a partial file is fine. There is no editor in the
+page — this is a demo, not a theme builder.
 
-- **Edit the file.** The shape is documented by its own contents; the page deep
-  merges it over a fallback, so a partial file is fine.
-- **Use the page.** "Customise this page" opens a drawer over the same object.
-  Edits apply live and are kept in `localStorage`; "Copy site.config.json"
-  hands back a replacement for this file, and "Copy share link" encodes the
-  changes into the URL so someone else opens your version rather than theirs.
+`theme` carries the three font slots and an optional `accent`, which overrides
+the one colour that reads as a brand. The faces must be ones listed in
+`assets/config.js`, which is also the list the single font request is built
+from. The palette itself is one set of tokens in that file and is not a choice:
+the page is a printed record under lamplight, and that is the whole design.
 
-A visitor's overrides never reach anyone else's page, and they are stored as a
-diff, so a wording change in the repository still shows through to people who
-only changed the palette.
+## Layout
 
-### Palettes and faces
+The page holds one screen and does not scroll. `body` is a three-row grid —
+masthead, main, footer — and inside `main` the signal strip takes whatever
+height is left over, so the waveform grows on a tall display rather than
+leaving a gap. Below 820 px wide or 560 px tall the fixed height stops being a
+feature, and the page goes back to scrolling.
 
-`theme.preset` picks one of `paper`, `night`, `terminal` or `blueprint`, each a
-complete set of tokens rather than a tint of the others. `theme.accent` either
-names a colour or is empty, which means "whatever the preset says" — that is
-what keeps a preset a design and not a background colour. The three font slots
-accept only the faces listed in `assets/config.js`, which is also the list the
-font request is built from.
+Two details are load-bearing and easy to undo by accident. The canvas is
+absolutely positioned, because a canvas carries an intrinsic size from its
+`width`/`height` attributes and `draw` sets those from the box it is
+measuring — in normal flow it feeds its own height back into the grid row that
+sizes it. And every grid here names its column `minmax(0, 1fr)`, because an
+implicit `auto` column sizes to max-content, and the phone track's max-content
+is the entire transcription however much it scrolls.
 
 ## Files
 
-| File                   | What it is                                          |
-| ---------------------- | --------------------------------------------------- |
-| `index.html`           | Structure, with `data-copy` hooks the config fills   |
-| `site.config.json`     | Everything the page says and most of how it looks    |
-| `assets/config.js`     | Palettes, faces, merging, sharing, persistence       |
-| `assets/engine.js`     | The wasm calling convention and WAV writing          |
-| `assets/waveform.js`   | Canvas drawing and the time ruler                    |
-| `assets/customiser.js` | The drawer, generated from the config                |
-| `assets/app.js`        | Wiring                                               |
-| `assets/style.css`     | The look, entirely in custom properties              |
+| File                 | What it is                                        |
+| -------------------- | ------------------------------------------------- |
+| `index.html`         | Structure, with `data-copy` hooks the config fills |
+| `site.config.json`   | Everything the page says                          |
+| `assets/config.js`   | Palette, faces, merging the config over a fallback |
+| `assets/engine.js`   | The wasm calling convention and WAV writing        |
+| `assets/waveform.js` | Canvas drawing and the time ruler                  |
+| `assets/app.js`      | Wiring                                             |
+| `assets/style.css`   | The look, entirely in custom properties            |

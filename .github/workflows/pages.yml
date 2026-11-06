@@ -1,0 +1,89 @@
+name: Pages
+
+# The demo site is generated, never committed: `tools/build_site.py` compiles
+# the engine to WebAssembly once per voice set, copies `web/` next to the
+# modules and writes the manifest the page reads. So the site is whatever main
+# currently is, and a voice added to the crate appears on it without anyone
+# editing HTML.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # On a PR the site is only built, never deployed — enough to catch a page
+    # that no longer compiles without publishing it.
+    paths:
+      - "web/**"
+      - "wasm/**"
+      - "tools/build_site.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+# Deploys are not interchangeable the way CI runs are: cancelling one halfway
+# can leave the live site mid-upload, so a second push waits instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The browser build is its own crate with its own target directory;
+          # without this line only the host build of the library is cached.
+          workspaces: |
+            .
+            wasm
+
+      # Worth roughly a tenth of each module, nearly all of it code rather than
+      # voice data. The build script skips it when it is missing, so this is an
+      # improvement and not a requirement.
+      - name: Install binaryen
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends binaryen
+
+      - name: Build
+        run: python3 tools/build_site.py --out _site
+
+      # The modules are several megabytes each and Pages has limits worth
+      # noticing before a deploy rather than after one.
+      - name: Report what was built
+        run: |
+          cat _site/build.json
+          du -sh _site
+          find _site -name '*.wasm' -printf '%s\t%p\n' | sort -rn
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy
+    # Pull requests build but do not publish; forks have no credentials to
+    # publish with in any case.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

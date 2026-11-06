@@ -1,0 +1,38 @@
+# Standalone: the root crate is not a workspace, and this one should not be
+# swept into it if that ever changes. It is not published; it exists so the
+# engine can be built for the browser.
+[workspace]
+
+[package]
+name = "flite-rs-wasm"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.70"
+license = "Apache-2.0"
+description = "A raw wasm32 front-end for flite-rs: no bindgen, no JS toolchain, one .wasm file."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Each of these turns on one more voice in the module. They exist so the build
+# can emit several modules from one source: a small one that speaks
+# immediately, and larger ones the page fetches only when a voice is picked.
+kal16 = ["flite-rs/kal16"]
+clustergen = ["flite-rs/clustergen"]
+
+[dependencies]
+# No default features: the CLI front-end would drag in clap, and the browser
+# has no command line. Without it the engine has no dependencies at all.
+flite-rs = { path = "..", default-features = false }
+
+[profile.release]
+# Speed, not size: almost all of the module is voice data, which no amount of
+# code shrinking touches, and the synthesis loop is the thing a visitor feels.
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

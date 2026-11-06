@@ -10,6 +10,10 @@ repository = "https://github.com/GabrielVicini/flite-rs"
 readme = "README.md"
 keywords = ["tts", "speech", "synthesis", "audio", "diphone"]
 categories = ["multimedia::audio", "text-processing"]
+# The browser demo and its wasm front-end are built from this repository
+# but are not part of the library, and the packaged crate is already close
+# enough to the registry size limit to care.
+exclude = ["/web", "/wasm", "/.github"]
 
 [lib]
 name = "flite_rs"

@@ -1,0 +1,103 @@
+{
+  "$comment": "Every word and colour on the page comes from this file. Edit it and the site changes; nothing here is baked into the markup. The customiser in the page edits the same shape and will hand you a replacement for this file.",
+
+  "brand": {
+    "name": "flite-rs",
+    "eyebrow": "Carnegie Mellon lineage, rewritten in Rust",
+    "standfirst": "A speech synthesiser small enough to live inside a web page.",
+    "note": "Nothing you type leaves this machine. The voice is compiled into the page.",
+    "footer": "flite-rs is Apache-2.0. The voices come from CMU and keep their own terms."
+  },
+
+  "theme": {
+    "preset": "paper",
+    "accent": "",
+    "display": "Instrument Serif",
+    "body": "Archivo",
+    "mono": "DM Mono",
+    "grain": true,
+    "wordmarkScale": 1
+  },
+
+  "labels": {
+    "signal": "Signal",
+    "phones": "Phones",
+    "text": "Text",
+    "engine": "Engine",
+    "speak": "Speak",
+    "stop": "Stop",
+    "download": "Save WAV",
+    "hint": "to render",
+    "rate": "Rate",
+    "pitch": "Pitch",
+    "customise": "Customise this page",
+    "empty": "Type something and press Speak.",
+    "idle": "nothing rendered yet"
+  },
+
+  "engines": [
+    {
+      "id": "clustergen",
+      "label": "Clustergen",
+      "module": "clustergen",
+      "voice": "slt",
+      "note": "Statistical parametric. No recordings: mel-cepstral trajectories predicted by regression trees, run through an MLSA filter. Voice cmu_us_slt, 16 kHz.",
+      "enabled": true
+    },
+    {
+      "id": "diphone16",
+      "label": "Diphone 16k",
+      "module": "kal16",
+      "voice": "kal16",
+      "note": "Concatenative. Recorded diphones spliced together and resynthesised at the pitch the model asks for. Voice cmu_us_kal, 16 kHz.",
+      "enabled": true
+    },
+    {
+      "id": "diphone8",
+      "label": "Diphone 8k",
+      "module": "core",
+      "voice": "kal",
+      "note": "The same technique on the 8 kHz database — the one upstream Flite ships by default, and the smallest download here.",
+      "enabled": true
+    }
+  ],
+
+  "defaultEngine": "diphone16",
+
+  "samples": [
+    {
+      "label": "Plain",
+      "text": "This is a residual excited linear predictive synthesiser, running entirely in your browser."
+    },
+    {
+      "label": "Numbers",
+      "text": "On the 3rd of April 1998, 1,204 people paid $12.50 each, which came to $15,050."
+    },
+    {
+      "label": "Hard words",
+      "text": "The phonologist archived a thorough bibliography of Gaelic diphthongs on Wednesday."
+    },
+    {
+      "label": "Long",
+      "text": "Speech synthesis by rule has a long history at Carnegie Mellon. Festival came first, then Flite, which stripped the same models down until they fit on a handheld. This is that engine again, written from the published descriptions rather than translated from the source, and compiled to run where you are reading."
+    }
+  ],
+
+  "panels": {
+    "waveform": true,
+    "phones": true,
+    "readout": true,
+    "facts": true,
+    "essay": true
+  },
+
+  "about": {
+    "body": "<p><strong>flite-rs</strong> is a clean-room Rust implementation of the synthesis techniques behind CMU's Flite and Festival: CART models for phrasing, duration and intonation, rule-based letter-to-sound, and two ways of turning phones into sound.</p><p>No C, no FFI, no <code>unsafe</code>, and no runtime dependencies. The browser build here is a plain <code>wasm32-unknown-unknown</code> target with a hand-written calling convention — there is no bindgen and no JavaScript toolchain anywhere in the deploy.</p>"
+  },
+
+  "links": [
+    { "label": "Source", "href": "https://github.com/GabrielVicini/flite-rs" },
+    { "label": "crates.io", "href": "https://crates.io/crates/flite-rs" },
+    { "label": "Docs", "href": "https://docs.rs/flite-rs" }
+  ]
+}

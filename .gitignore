@@ -13,3 +13,7 @@ __pycache__/
 # The upstream Flite reference build, which is produced locally from a source
 # tree this repository does not carry.
 /tools/reference/build/
+
+# The wasm front-end's build directory, and the generated demo site.
+/wasm/target
+/_site

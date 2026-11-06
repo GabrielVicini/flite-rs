@@ -85,13 +85,18 @@ def optimise(path: Path) -> Path:
 
     It is worth roughly a tenth of the module, almost all of it code rather
     than voice data, so the build does not insist on it.
+
+    `--all-features` rather than a list: rustc decides which wasm proposals it
+    emits and that set moves with the compiler, so naming them here means the
+    optimiser starts refusing the module the next time rustc picks up
+    something new. It did exactly that over nontrapping-float-to-int.
     """
     if shutil.which("wasm-opt") is None:
         print(f"  wasm-opt not found, shipping {path.name} unoptimised")
         return path
     out = path.with_suffix(".opt.wasm")
     try:
-        run(["wasm-opt", "-O2", "--enable-bulk-memory", str(path), "-o", str(out)])
+        run(["wasm-opt", "-O2", "--all-features", str(path), "-o", str(out)])
     except subprocess.CalledProcessError:
         print(f"  wasm-opt failed on {path.name}; shipping the plain build")
         return path

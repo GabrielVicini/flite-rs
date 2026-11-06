@@ -197,7 +197,8 @@ pub fn u32_at(bytes: &[u8], i: usize) -> u32 {
 /// copy several megabytes of embedded voice at every startup to buy a
 /// flexibility the embedded case never uses.
 ///
-/// [`Deref`] makes the distinction invisible at every use site, so parsing code
+/// [`Deref`](std::ops::Deref) makes the distinction invisible at every use site,
+/// so parsing code
 /// reads a slice and does not care which case it has.
 #[derive(Clone, Debug)]
 pub enum VoiceData {
@@ -244,7 +245,7 @@ impl std::ops::Deref for VoiceData {
 /// name to a list in `src/`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Diphone concatenation: [`crate::voice::DiphoneVoice`].
+    /// Diphone concatenation: [`crate::diphone::DiphoneVoice`].
     Diphone,
     /// Clustergen statistical parametric synthesis.
     Clustergen,

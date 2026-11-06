@@ -49,7 +49,7 @@ enum Codec {
 
 /// A diphone database plus its pitch-period store.
 ///
-/// The tables are byte ranges into [`Self::data`] rather than borrowed slices,
+/// The tables are byte ranges into its own `data` rather than borrowed slices,
 /// so the voice owns its bytes and a runtime-loaded voice is as possible as an
 /// embedded one. See [`VoiceData`].
 pub struct DiphoneVoice {

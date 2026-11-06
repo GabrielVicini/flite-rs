@@ -27,7 +27,7 @@ optionally the same speaker at 16 kHz, and the `cmu_us_slt` Clustergen voice
 
 ```toml
 [dependencies]
-flite-rs = "0.2.0"
+flite-rs = "0.3.0"
 ```
 
 The library has no dependencies with `default-features = false`. The default
@@ -94,7 +94,7 @@ choice rather than change what a caller who asked for nothing hears:
 | `clustergen` | `slt`, 16 kHz female | ~2.5 MB | a different synthesiser, not a second database |
 
 ```toml
-flite-rs = { version = "0.2.0", features = ["kal16", "clustergen"] }
+flite-rs = { version = "0.3.0", features = ["kal16", "clustergen"] }
 ```
 
 ```rust

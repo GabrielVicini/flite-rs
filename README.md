@@ -14,7 +14,10 @@ MLSA filter. No C, no FFI, no `build.rs`, no `unsafe`. The models and the
 voices are embedded in the binary, so there is nothing to install and nothing
 to load at runtime.
 
-Feel free to check out the [WebAssembly live demo](https://flite-rs.vicini.io/).
+There is a [live demo](https://flite-rs.vicini.io/) that runs the engine in the
+browser — both backends, no server, nothing uploaded. It is generated from this
+repository on every push; see [`web/`](web/README.md) for how it is built and
+how to change what it says.
 
 Ships with `cmu_us_kal` (8 kHz, male, US English) and US English text handling;
 optionally the same speaker at 16 kHz, and the `cmu_us_slt` Clustergen voice
@@ -238,6 +241,11 @@ such guarantee; nothing selects it unless you ask for it by name.
 
 `std` is used for the WAV writer and for reading streamed input. A `no_std`
 build needs a feature gate there plus `alloc`.
+
+The browser target needs nothing beyond `cargo build --target
+wasm32-unknown-unknown`: [`wasm/`](wasm/src/lib.rs) is a small `cdylib` that
+exposes the engine through a dozen `extern "C"` functions, with no
+`wasm-bindgen` and no JavaScript toolchain in the build.
 
 ## Architecture
 
